@@ -1,0 +1,27 @@
+{
+  "entrada": "entrada_fabricante_modificado.docx",
+  "pdf": "FT PURE SEDUCTION 275898  ACTUALIZADA.pdf",
+  "fabricante_original": ": EMSA (ESENCIAS MOLES S.A.)",
+  "propuestas": [
+    {
+      "id": "20",
+      "value": ": ESENCIAS MOLES S.A.",
+      "page": 1,
+      "evidence": "ESENCIAS MOLES S.A. (nombre de la empresa en la parte superior y en el pie de página)"
+    },
+    {
+      "id": "22",
+      "value": ": PURE SEDUCTION",
+      "page": 1,
+      "evidence": "NOMBRE: PURE SEDUCTION"
+    }
+  ],
+  "observaciones": [
+    "No se incluyen cambios para el campo 'Proveedor' (id: 21) ya que el PDF no proporciona información explícita sobre un proveedor para ESENCIAS MOLES S.A., y no hay evidencia para reemplazar al proveedor existente.",
+    "Los campos de especificación del producto como 'Aspecto', 'Color', 'Control olfativo', 'Densidad relativa 20/20' e 'Índice de refracción n 20/D' están presentes en el PDF, pero no hay campos correspondientes en la solicitud para reportar estos datos.",
+    "El campo 'Tiempo de Vida Útil' (id: 23) ya coincide con la información del PDF, por lo que no se requiere cambio.",
+    "No se incluyen cambios para el campo 'Almacenamiento' (id: 24) ya que el PDF no proporciona condiciones de almacenamiento específicas (temperatura, protección de luz), solo la vida útil.",
+    "La dirección de ESENCIAS MOLES S.A. se encuentra en el PDF, pero no hay un campo correspondiente en la solicitud para actualizar esta información."
+  ],
+  "detectado": true
+}

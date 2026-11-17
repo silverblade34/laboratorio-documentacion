@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+build/
+dist/
+*.spec
+
+.gemini-key
+
+.gemini-key-extra
+.groq-key
+.openrouter-key
+
+preferencias.json
+
+.venv-mac/

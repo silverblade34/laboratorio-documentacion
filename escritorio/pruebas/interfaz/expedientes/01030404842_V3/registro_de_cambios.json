@@ -1,0 +1,28 @@
+{
+  "sap": "01030404842",
+  "version_anterior": 2,
+  "version_nueva": 3,
+  "fecha": "2026-11-12",
+  "solicitante": "Validación de interfaz",
+  "area": "Laboratorio",
+  "word_origen": "entrada_fabricante_modificado.docx",
+  "pdf_sin_analizar": [],
+  "cambios": [
+    {
+      "seccion": "B",
+      "campo": "Fabricante · FABRICANTE DE PRUEBA",
+      "antes": ": FABRICANTE DE PRUEBA",
+      "despues": "ESENCIAS MOLES S.A.",
+      "evidencias_propuestas": [
+        {
+          "id": "20",
+          "value": "ESENCIAS MOLES S.A.",
+          "page": 1,
+          "evidence": "ESENCIAS MOLES S.A.",
+          "pdf": "FT_PURE_SEDUCTION.pdf",
+          "provider": "Gemini"
+        }
+      ]
+    }
+  ]
+}

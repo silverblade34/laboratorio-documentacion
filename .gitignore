@@ -1,0 +1,35 @@
+# Entornos virtuales
+.venv/
+.venv-mac/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Compilaciones
+build/
+dist/
+*.spec
+
+# Llaves y credenciales privadas
+*.key
+.gemini-key*
+.groq-key*
+.openrouter-key*
+preferencias.json
+
+# Bases de datos y archivos locales
+*.sqlite3
+*.tmp
+.DS_Store
+.archivo_pruebas_anteriores/
+
+# Carpetas pesadas de pruebas y documentos locales (no requeridas para compilar el .exe)
+MATERIA PRIMA/
+tecnicas-detalle/
+PRUEBAS_MANUALES/
+EXPORTACIONES/
+VALIDACION_INTERFAZ/
