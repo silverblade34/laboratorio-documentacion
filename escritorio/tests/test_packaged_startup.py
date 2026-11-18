@@ -1,4 +1,5 @@
 """Checks startup metadata for PyInstaller's frozen application layout."""
+import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys
 import unittest
 from unittest.mock import patch

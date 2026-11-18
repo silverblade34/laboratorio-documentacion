@@ -18,15 +18,16 @@ import subprocess
 import sys
 import webbrowser
 
-from analysis_service import Catalog, inspect_document, provider_keys, verify_proposals, word_bytes, norm
+from analysis_service import Catalog, inspect_document, provider_keys, reconcile_commercial_roles, verify_proposals, word_bytes, norm
 from office import ChangeForm, Specification, manufacturer_key, word_text
 from techniques import technique_context, validate_section_a
 from history import History
 import activity_log as alog
+import key_health
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_MODEL = 'gemini-2.5-flash'
-APP_VERSION = '1.3.0'
+DEFAULT_MODEL = 'gemini-3.8-flash'
+APP_VERSION = '1.4.0'
 
 def source_revision():
     # PyInstaller embeds imported Python modules in its archive; they are not
@@ -34,7 +35,7 @@ def source_revision():
     # A frozen build is immutable, so its application version is its revision.
     if getattr(sys, 'frozen', False):
         return f'packaged-{APP_VERSION}'
-    names = ['desktop.py','office.py','analysis_service.py','preview.py','evidence_view.py','history.py','activity_log.py','connectivity.py','ui/app.js','ui/proposal-groups.js','ui/index.html','ui/style.css']
+    names = ['desktop.py','office.py','analysis_service.py','key_health.py','preview.py','evidence_view.py','history.py','activity_log.py','connectivity.py','ui/app.js','ui/proposal-groups.js','ui/index.html','ui/style.css']
     try:
         return hashlib.sha256(b''.join((ROOT/name).read_bytes() for name in names)).hexdigest()[:10]
     except OSError:
@@ -50,6 +51,7 @@ class Workspace:
         self.catalog = Catalog()
         self.settings_path = self.catalog.path.with_name('preferencias.json')
         alog.setup(self.catalog.path.parent)
+        key_health.setup(self.catalog.path.parent)
         alog.log('info', 'Aplicación', f'Materia {APP_VERSION} iniciada', alog.environment())
         try:
             self.settings = json.loads(self.settings_path.read_text())
@@ -76,6 +78,10 @@ class Workspace:
         self.evidence_cache = {}
         self.history_id = None
         self.exported = ''
+        self.rejected = set()      # Cambios que el usuario quitó de la revisión (se conservan sus propuestas).
+        self.companies = []        # Empresas leídas en logotipos, membretes y sellos de los PDF.
+        self.role_cache = {}       # Clasificación fabricante/proveedor ya validada con IA o Google.
+        self.maker_choices = {}    # Decisión por fabricante detectado: incluir, nuevo o existente, datos editados.
 
     @property
     def history(self):
@@ -90,6 +96,8 @@ class Workspace:
             record = {'sap': self.spec.sap, 'version': self.spec.version, 'sections': self.sections[:],
                       'proposals': {k: v[:] for k, v in self.proposals.items()}, 'notes': self.notes[:],
                       'approved': dict(self.approved), 'successes': [p.name for p in self.successes],
+                      'rejected': sorted(self.rejected), 'companies': self.companies[:],
+                      'maker_choices': self.maker_choices,
                       'exportado': self.exported}
         try:
             self.history.save(entry, word, pdfs, record)
@@ -108,6 +116,9 @@ class Workspace:
             self.proposals = {k: v for k, v in data.get('proposals', {}).items() if k in spec.fields}
             self.approved = {k: v for k, v in data.get('approved', {}).items() if k in spec.fields}
             self.notes = data.get('notes', [])
+            self.rejected = {k for k in data.get('rejected', []) if k in spec.fields}
+            self.companies = data.get('companies', [])
+            self.maker_choices = data.get('maker_choices', {})
             done = set(data.get('successes', []))
             self.successes = {p: True for p in pdfs if p.name in done}
             self.history_id, self.exported = entry_id, data.get('exportado', '')
@@ -118,6 +129,7 @@ class Workspace:
             fields = [] if self.spec is None else [
                 {'id': i, 'section': f.section, 'label': f.label, 'before': f.value,
                  'kind': f.kind, 'manufacturer_number': f.manufacturer_number, 'manufacturer_name':f.manufacturer_name, 'approved': self.approved.get(i),
+                 'rejected': i in self.rejected,
                  'proposals': self.proposals.get(i, []),
                  'cell': word_text(f.node).strip() if f.kind in {'range', 'range_add'} else None}
                 for i, f in self.spec.fields.items() if f.section in self.sections]
@@ -143,20 +155,24 @@ class Workspace:
                 'approved_count': len(self.approved),
                 'manufacturer_numbers': self.manufacturer_numbers(),
                 'history_id': self.history_id or '',
+                'maker_choices': self.maker_choices,
             }
 
-    def manufacturer_numbers(self):
+    def manufacturer_numbers(self, approved=None):
         """Número que tendrá cada fabricante en B: vigentes y bloques nuevos ya aprobados."""
         if not self.spec:
             return {}
         numbers = {manufacturer_key(g['name']): g['number'] for g in self.spec.manufacturers}
-        for i, value in self.approved.items():
+        for i, value in (self.approved if approved is None else approved).items():
             if self.spec.fields[i].kind == 'manufacturer':
                 for name in re.findall(r'(?im)^fabricante\s*:\s*(.+)$', value):
                     numbers.setdefault(manufacturer_key(name), max(numbers.values(), default=0)+1)
         return numbers
 
     def reset_review(self):
+        self.rejected = set()
+        self.maker_choices = {}
+        self.companies = []
         self.approved.clear()
         self.proposals.clear()
         self.successes.clear()
@@ -211,12 +227,14 @@ class Workspace:
             self.history_id, self.exported = None, ''
 
     def save_settings(self, payload):
-        if payload.get('modelo'):
-            import re
-            if not re.fullmatch(r'gemini-[a-zA-Z0-9._-]+', payload['modelo']):
-                raise ValueError('Indica un modelo Gemini válido.')
+        if payload.get('modelo') and not re.fullmatch(r'gemini-[a-zA-Z0-9._-]+', payload['modelo']):
+            raise ValueError('Indica un modelo Gemini válido.')
+        if payload.get('groq_model') and not re.fullmatch(r'[\w.-]+(/[\w.:-]+)?', payload['groq_model']):
+            raise ValueError('Indica un modelo de Groq válido.')
+        if payload.get('openrouter_model') and not re.fullmatch(r'[\w.-]+/[\w.:-]+', payload['openrouter_model']):
+            raise ValueError('Indica un modelo de OpenRouter válido (proveedor/modelo).')
         updated = self.settings.copy()
-        for key in ('salida', 'plantilla', 'solicitante', 'area', 'modelo', 'renderizador'):
+        for key in ('salida', 'plantilla', 'solicitante', 'area', 'modelo', 'groq_model', 'openrouter_model', 'renderizador'):
             if key in payload:
                 updated[key] = str(payload[key]).strip()
         if payload.get('renderizador') and not Path(payload['renderizador']).is_file():
@@ -259,6 +277,11 @@ class Workspace:
         if not fields:
             raise ValueError('Selecciona al menos una sección.')
         pending = [(i, p) for i, p in enumerate(self.pdfs) if p not in self.successes]
+        if not self.successes:
+            # Análisis desde cero: no se arrastran propuestas ni aprobaciones de un análisis anterior.
+            self.proposals.clear(); self.approved.clear(); self.rejected = set()
+            self.maker_choices = {}; self.companies = []
+            self.history_id = None
         if not pending:
             self.successes.clear()
             self.proposals.clear()
@@ -273,15 +296,24 @@ class Workspace:
                          'message': 'Leyendo documentación técnica'}
         sap = self.spec.sap
         context = self.catalog.context(sap)
-        model = self.settings.get('modelo') or DEFAULT_MODEL
+        model = self.settings.get('modelo')
+        if not model:
+            from analysis_service import gemini_models
+            model = next(iter(gemini_models(keys)), DEFAULT_MODEL) if keys else DEFAULT_MODEL
         openrouter_model = self.settings.get('openrouter_model')
+        groq_model = self.settings.get('groq_model')
+        if openrouter and not openrouter_model:
+            # Sin modelo elegido se usa el gratuito recomendado (el predeterminado de la API es de pago).
+            from analysis_service import openrouter_free_models
+            openrouter_model = openrouter_free_models()[0][0]['id']
         alog.log('info', 'Análisis', f'Inicio · {len(pending)} PDF pendiente(s) de {len(self.pdfs)} · secciones {", ".join(self.sections)} · {len(fields)} campos',
                  f'SAP {sap} · modelo {model} · {len(keys)} clave(s) Gemini · {len(groq)} clave(s) Groq · {len(openrouter)} clave(s) OpenRouter · historial {self.history_id or "nuevo"}')
 
         def analyze(index, path):
             if self.stop.is_set():
                 return None
-            return inspect_document(path, fields, sap, context, keys, groq, model, index, openrouter_keys=openrouter, openrouter_model=openrouter_model)
+            return inspect_document(path, fields, sap, context, keys, groq, model, index, openrouter_keys=openrouter,
+                                    openrouter_model=openrouter_model, groq_model=groq_model)
 
         def worker():
             try:
@@ -292,9 +324,10 @@ class Workspace:
                         try:
                             outcome = task.result()
                             if outcome:
-                                changes, notes, provider = outcome
+                                changes, notes, provider, companies = outcome
                                 with self.lock:
                                     self.successes[path] = outcome
+                                    self.companies.extend(companies)
                                     for change in changes:
                                         self.proposals.setdefault(change['id'], []).append({
                                             **change, 'pdf': path.name, 'provider': provider})
@@ -313,7 +346,9 @@ class Workspace:
                             self.progress['finished'] += 1
                             self.progress['message'] = f'Procesado {path.name}'
                 if not self.stop.is_set():
-                    self.second_review(fields, keys, groq, model)
+                    self.second_review(fields, keys, groq, model, openrouter, openrouter_model)
+                if not self.stop.is_set():
+                    self.reconcile_roles(fields, keys, groq, model, openrouter, openrouter_model)
             except Exception:
                 alog.exception('Análisis', 'Fallo inesperado del proceso de análisis')
                 raise
@@ -327,7 +362,7 @@ class Workspace:
 
         Thread(target=worker, daemon=True).start()
 
-    def second_review(self, fields, keys, groq, model):
+    def second_review(self, fields, keys, groq, model, openrouter=(), openrouter_model=None):
         """Segunda revisión de IA de las propuestas consolidadas que aún no se verificaron."""
         with self.lock:
             pending = {k: [p for p in v if 'verified' not in p] for k, v in self.proposals.items()}
@@ -336,7 +371,7 @@ class Workspace:
                 return
             self.progress['message'] = 'Segunda revisión: la IA comprueba que cada propuesta tenga sentido'
         try:
-            checked, notes = verify_proposals(fields, pending, keys, groq, model)
+            checked, notes = verify_proposals(fields, pending, keys, groq, model, openrouter, openrouter_model)
         except Exception as exc:
             alog.exception('Segunda revisión', f'No se completó: {exc}')
             with self.lock:
@@ -353,6 +388,55 @@ class Workspace:
             verified = sum(len(v) for v in checked.values())
             self.notes.append({'type': 'success', 'file': 'Segunda revisión', 'text': f'{verified} propuesta(s) verificadas por IA'})
             self.notes.extend({'type': 'info', 'file': 'Segunda revisión', 'text': n} for n in notes)
+
+    def reconcile_roles(self, fields, keys, groq, model, openrouter=(), openrouter_model=None):
+        """Valida fabricante/proveedor de los bloques propuestos (IA con Google y reglas peruanas)."""
+        with self.lock:
+            proposals = {k: v[:] for k, v in self.proposals.items()}
+            companies = self.companies[:]
+            self.progress['message'] = 'Validando fabricantes y proveedores (IA y búsqueda en Google)'
+        try:
+            updated, notes = reconcile_commercial_roles(fields, proposals, companies, keys, groq, model, self.role_cache,
+                                                        openrouter, openrouter_model)
+        except Exception as exc:
+            alog.exception('Roles comerciales', f'No se completó la validación: {exc}')
+            return
+        with self.lock:
+            for k, v in updated.items():
+                if k in self.proposals:
+                    self.proposals[k] = v
+            self.notes.extend({'type': 'info', 'file': 'Fabricantes y proveedores', 'text': n} for n in notes)
+
+    def merged_changes(self, draft):
+        """Aprobados + borrador de la vista de revisión (sin los quitados), validados uno a uno.
+
+        Devuelve (cambios, omitidos). Un rango de un fabricante que aún no tendrá número se omite.
+        """
+        merged = dict(self.approved)
+        skipped = []
+        draft = {k: v for k, v in (draft or {}).items()
+                 if k in self.spec.fields and k not in self.approved and k not in self.rejected and str(v).strip()}
+        ordered = sorted(draft.items(), key=lambda item: {'manufacturer': 0, 'range_add': 2}.get(self.spec.fields[item[0]].kind, 1))
+        for field_id, value in ordered:
+            field = self.spec.fields[field_id]
+            try:
+                if field.section == 'A':
+                    validate_section_a(field, value)
+                if field.kind == 'range_add':
+                    known = self.manufacturer_numbers(merged)
+                    lines = [l.strip() for l in value.splitlines() if l.strip()]
+                    kept = [l for l in lines if manufacturer_key(l.partition(' | ')[0].partition(':')[2]) in known]
+                    if not kept:
+                        raise ValueError('su fabricante no está incluido en B')
+                    value = '\n'.join(kept)
+                else:
+                    Specification(self.spec.data).fields[field_id].write(value)
+            except (ValueError, TypeError) as exc:
+                skipped.append({'id': field_id, 'error': str(exc)})
+                continue
+            if value.strip() != field.value.strip():
+                merged[field_id] = value
+        return merged, skipped
 
     def approve(self, payload):
         field_id, value = payload['id'], payload['value']
@@ -378,6 +462,7 @@ class Workspace:
                 raise ValueError('Aprueba primero en B el bloque de ' + ', '.join(missing) + ' («Agregar fabricante y su bloque comercial»); así recibe su número antes de asignarle rangos.')
         else:
             Specification(self.spec.data).fields[field_id].write(value)
+        self.rejected.discard(field_id)
         if value.strip() == field.value.strip():
             self.approved.pop(field_id, None)
         else:
@@ -418,7 +503,7 @@ class Workspace:
                       'solicitante': self.settings['solicitante'], 'area': self.settings['area'],
                       'word_origen': self.word.name,
                       'registrar_revision_historica': payload.get('add_history', True),
-                      'revision_historica': payload.get('history_text', self.spec.history_summary(self.approved)),
+                      'revision_historica': payload.get('history_text') if payload.get('history_text') is not None else self.spec.history_summary(self.approved),
                       'pdf_sin_analizar': [p.name for p in self.pdfs if p not in self.successes],
                       'cambios': [{'seccion': spec.fields[i].section, 'campo': spec.fields[i].label,
                                   'antes': spec.fields[i].value, 'despues': value,
@@ -466,7 +551,7 @@ class Workspace:
             if alog.log_path():
                 self.open_path(Path(alog.log_path()).parent)
             return {}
-        if self.busy and action not in {'cancel', 'open_pdf', 'connectivity', 'pdf_page'}:
+        if self.busy and action not in {'cancel', 'open_pdf', 'connectivity', 'pdf_page', 'keys_health', 'keys_test', 'openrouter_models', 'gemini_models'}:
             raise ValueError('Detén el análisis antes de cambiar los documentos.')
         if action == 'connectivity':
             from connectivity import check
@@ -485,6 +570,27 @@ class Workspace:
         elif action == 'discard':
             self.approved.pop(payload['id'], None)
             self.proposals.pop(payload['id'], None)
+            self.persist()
+        elif action == 'reject':
+            # Quitar desde la vista de revisión: deja de aplicarse, pero la propuesta se conserva.
+            if payload['id'] not in self.spec.fields:
+                raise ValueError('Campo no disponible.')
+            self.approved.pop(payload['id'], None)
+            self.rejected.add(payload['id'])
+            self.persist()
+        elif action == 'maker_choices':
+            choices = payload.get('choices')
+            if not isinstance(choices, dict):
+                raise ValueError('Selección de fabricantes no válida.')
+            self.maker_choices = json.loads(json.dumps(choices))
+            self.persist()
+        elif action == 'unapprove':
+            for field_id in payload.get('ids', []):
+                self.approved.pop(field_id, None)
+                self.rejected.discard(field_id)
+            self.persist()
+        elif action == 'restore':
+            self.rejected.discard(payload['id'])
             self.persist()
         elif action == 'history_list':
             return {'items': self.history.entries(), 'current': self.history_id or ''}
@@ -507,27 +613,31 @@ class Workspace:
         elif action == 'folder':
             return self.choose_folder()
         elif action == 'techniques':
-            return {'items': technique_context()}
+            from techniques import catalog_entries
+            used = ' '.join(f.value for f in self.spec.fields.values()) if self.spec else ''
+            return {'items': catalog_entries(used)}
         elif action == 'history':
             if not self.spec:
                 raise ValueError('Carga primero el Word vigente.')
-            return {'text': self.spec.history_summary(self.approved)}
+            changes = self.merged_changes(payload.get('draft'))[0] if payload.get('draft') else self.approved
+            return {'text': self.spec.history_summary(changes)}
         elif action == 'preview':
             if not self.spec:
                 raise ValueError('Carga primero el Word vigente.')
             effective = date.fromisoformat(payload['fecha'])
             with self.lock:
                 preview_spec = Specification(self.spec.data)
-                preview_approved = self.approved.copy()
+                preview_approved, skipped = self.merged_changes(payload.get('draft'))
+            colors = {k: int(v) for k, v in (payload.get('colors') or {}).items()}
             if payload.get('mode') == 'content':
                 return {'html': preview_spec.preview_html(preview_approved, effective,
-                            payload.get('add_history', True), payload.get('history_text'))}
+                            payload.get('add_history', True), payload.get('history_text'), colors), 'skipped': skipped}
             from preview import render_document
             digest = hashlib.sha256(preview_spec.data + json.dumps([preview_approved, payload, self.settings.get('renderizador','')],sort_keys=True).encode()).hexdigest()
             with self.preview_lock:
                 if digest not in self.preview_cache:
-                    self.preview_cache = {digest:render_document(preview_spec,preview_approved,effective,
-                        payload.get('add_history',True),payload.get('history_text'),self.settings.get('renderizador',''))}
+                    self.preview_cache = {digest:{**render_document(preview_spec,preview_approved,effective,
+                        payload.get('add_history',True),payload.get('history_text'),self.settings.get('renderizador',''),colors),'skipped':skipped}}
                 return self.preview_cache[digest]
         elif action == 'export':
             return self.export(payload)
@@ -546,10 +656,42 @@ class Workspace:
                         line = line.strip()
                         if line and line not in current:
                             current.append(line)
-                    with path.open('w', opener=lambda p, flags: os.open(p, flags, 0o600)) as file:
+                    # Path.open() no admite 'opener' (falla en Windows y en cualquier Python);
+                    # open() sí, y así el archivo nace con permisos 0600 en macOS/Linux.
+                    with open(path, 'w', encoding='utf-8', opener=lambda p, flags: os.open(p, flags, 0o600)) as file:
                         file.write('\n'.join(current) + '\n')
                     os.chmod(path, 0o600)
             return {'status': 'ok'}
+        elif action == 'open_url':
+            pages = {'gemini': 'https://aistudio.google.com/apikey', 'groq': 'https://console.groq.com/keys',
+                     'openrouter': 'https://openrouter.ai/keys'}
+            if payload.get('provider') not in pages:
+                raise ValueError('Enlace no disponible.')
+            webbrowser.open(pages[payload['provider']])
+            return {}
+        elif action == 'gemini_models':
+            from analysis_service import gemini_models
+            keys = provider_keys()[0]
+            return {'models': gemini_models(keys) if keys else []}
+        elif action == 'openrouter_models':
+            from analysis_service import openrouter_free_models
+            models, live = openrouter_free_models()
+            return {'models': models, 'live': live}
+        elif action == 'keys_health':
+            from analysis_service import key_inventory
+            return {'keys': key_health.report(key_inventory())}
+        elif action == 'keys_test':
+            from analysis_service import key_inventory, test_key
+            keys = [k for k in key_inventory() if (not payload.get('id') or key_health.fingerprint(k[1]) == payload['id'])
+                    and (not payload.get('provider') or k[0] == payload['provider'])]
+            # Todas a la vez: el tiempo total es el de la clave más lenta, no la suma.
+            with ThreadPoolExecutor(max_workers=max(1, min(8, len(keys)))) as pool:
+                list(pool.map(lambda k: test_key(k[0], k[1], self.settings.get('modelo') or DEFAULT_MODEL), keys))
+            return {'keys': key_health.report(key_inventory())}
+        elif action == 'key_delete':
+            from analysis_service import delete_key, key_inventory
+            delete_key(payload.get('provider'), payload.get('id'))
+            return {'keys': key_health.report(key_inventory())}
         elif action == 'pdf_page':
             pdf = next((p for p in self.pdfs if p.name == payload.get('name')), None)
             if pdf is None:

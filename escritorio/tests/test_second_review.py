@@ -1,6 +1,7 @@
 """Segunda revisión de IA (respuesta simulada) y orden fabricante → rango."""
 from pathlib import Path
 from unittest import mock
+import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys, tempfile, unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import analysis_service

@@ -4,21 +4,33 @@ let state = null;
 let currentField = null;
 let currentPage = 'workspace';
 let toastTimer;
-let requesting = false;
 let previewRequest = 0;
 let historySignature = '';
 let historyText = '';
 let addHistory = true;
 let revisionDate = new Date().toLocaleDateString('en-CA');
 
+// Acciones que el usuario espera ver terminar (no las consultas periódicas de fondo).
+const BACKGROUND = new Set(['logs', 'connectivity', 'keys_health', 'gemini_models', 'openrouter_models']);
+let pendingRequests = 0, loadingTimer = null;
+function setLoading(delta) {
+  pendingRequests = Math.max(0, pendingRequests + delta);
+  clearTimeout(loadingTimer);
+  if (pendingRequests) loadingTimer = setTimeout(() => document.body.classList.add('working'), 350);
+  else document.body.classList.remove('working');
+}
 async function api(action, payload = {}) {
-  const response = await fetch('/api/' + action, {
-    method: 'POST', headers: {'Content-Type': 'application/json', 'X-Session': window.SESSION},
-    body: JSON.stringify(payload)
-  });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || 'No se pudo completar la operación.');
-  return result;
+  const tracked = !BACKGROUND.has(action);
+  if (tracked) setLoading(1);
+  try {
+    const response = await fetch('/api/' + action, {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Session': window.SESSION},
+      body: JSON.stringify(payload)
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'No se pudo completar la operación.');
+    return result;
+  } finally { if (tracked) setLoading(-1); }
 }
 function toast(text, error = false) {
   $('toast').textContent = text;
@@ -26,17 +38,22 @@ function toast(text, error = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => $('toast').classList.add('hidden'), error ? 11000 : 4500);
 }
-async function perform(action, payload = {}) {
-  if (requesting) return;
-  requesting = true;
-  try {
-    const result = await api(action, payload);
-    await refresh();
-    return result;
-  } catch (error) {
-    toast(error.message, true);
-    throw error;
-  } finally { requesting = false; }
+// Las acciones se encadenan: un clic durante otra acción espera su turno en lugar de perderse.
+let actionQueue = Promise.resolve();
+function perform(action, payload = {}) {
+  const run = async () => {
+    try {
+      const result = await api(action, payload);
+      await refresh();
+      return result;
+    } catch (error) {
+      toast(error.message, true);
+      throw error;
+    }
+  };
+  const result = actionQueue.then(run, run);
+  actionQueue = result.catch(() => {});
+  return result;
 }
 async function refresh() {
   const response = await fetch('/api/state', {headers: {'X-Session': window.SESSION}});
@@ -51,8 +68,9 @@ function render() {
   $('pdf-name').textContent = state.pdfs.length ? state.pdfs.length + ' PDF · ' + state.pdfs.join(', ') : 'Fichas técnicas, certificados y hojas de seguridad';
   $('material-badge').classList.toggle('hidden', !state.sap);
   $('material-badge').textContent = state.sap + ' · Versión ' + state.version;
-  $('demo-help').classList.toggle('hidden', !state.demo);
-  $('demo-button').disabled = state.busy;
+  // El ejemplo preparado es opcional en la interfaz.
+  if ($('demo-help')) $('demo-help').classList.toggle('hidden', !state.demo);
+  if ($('demo-button')) $('demo-button').disabled = state.busy;
   $('analyze-button').disabled = state.busy || !state.word || !state.pdfs.length || !state.sections.length;
   const errors = state.notes.filter(n => n.type === 'error');
   $('analyze-button').innerHTML = (errors.length ? 'Reintentar pendientes' : 'Analizar documentos') + ' <span>→</span>';
@@ -68,7 +86,6 @@ function render() {
   } else {
     if ($('service-banner')) $('service-banner').classList.add('hidden');
   }
-  renderKeysList();
   $('scope-button').disabled = state.busy;
   document.querySelectorAll('#scope-menu input').forEach(input => input.checked = state.sections.includes(input.value));
   $('progress-panel').classList.toggle('hidden', !state.busy);
@@ -76,17 +93,36 @@ function render() {
   $('analysis-progress').value = state.progress.finished;
   $('progress-message').textContent = state.progress.message || 'Analizando documentación';
   $('preview-button').disabled = state.busy || !state.word;
+  renderAnalysisResult(errors);
   $('export-button').disabled = state.busy || !state.approved_count;
   $('manual-button').disabled = state.busy || !state.word;
   $('empty-manual').disabled = state.busy || !state.word;
   $('change-count').textContent = state.fields.filter(f => f.proposals.length || f.approved != null).length;
+  if ($('advanced-count')) $('advanced-count').textContent = '· ' + $('change-count').textContent + ' campo(s) · ' + state.notes.length + ' observación(es)';
   $('note-count').textContent = state.notes.length;
   $('approved-label').textContent = state.approved_count + ' aprobados';
   $('export-title').textContent = state.approved_count ? state.approved_count + ' cambio(s) aprobado(s) para la versión ' + (state.version + 1) : 'Tu expediente, listo para documentar.';
   $('footer-state').textContent = state.busy ? 'Análisis en curso' : errors.length ? errors.length + ' PDF requieren atención' : state.word ? 'Materia prima ' + state.sap : 'Preparado para comenzar';
   $('commercial-attention').classList.toggle('hidden', !state.commercial_attention);
   renderRows();
+  renderReview();
   $('notes-view').innerHTML = state.notes.length ? state.notes.map(n => '<div class="note ' + esc(n.type) + '"><strong>' + esc(n.file) + '</strong>' + esc(n.text) + '</div>').join('') : '<div class="empty-state"><h3>Sin observaciones por el momento</h3><p>El resultado de cada documento aparecerá aquí.</p></div>';
+}
+function renderAnalysisResult(errors) {
+  const hasResults = state.fields.some(f => f.proposals.length || f.approved != null);
+  const analyzed = state.notes.some(n => n.type === 'success');
+  $('export-bar').classList.toggle('hidden', state.busy || !hasResults);
+  $('advanced-review').classList.toggle('hidden', state.busy || !(hasResults || state.notes.length));
+  const box = $('analysis-result');
+  if (state.busy || !errors.length) { box.classList.add('hidden'); return; }
+  const failedAll = !analyzed;
+  box.className = 'analysis-result ' + (failedAll ? 'failed' : 'partial');
+  box.innerHTML = '<strong>' + (failedAll ? 'No se pudo analizar ningún PDF' : errors.length + ' PDF no se pudieron analizar') + '</strong>'
+    + '<ul>' + errors.map(n => '<li><b>' + esc(n.file) + '</b>' + esc(n.text) + '</li>').join('') + '</ul>'
+    + '<p>Suele deberse a claves saturadas o a un modelo sobrecargado. Revisa el estado de las claves o elige otro modelo y reintenta.</p>'
+    + '<div><button class="primary small" id="result-retry">Reintentar</button> <button class="secondary small" id="result-keys">Ver estado de las claves</button></div>';
+  $('result-retry').onclick = () => $('analyze-button').click();
+  $('result-keys').onclick = showKeys;
 }
 function renderRows() {
   if (!state) return;
@@ -100,8 +136,8 @@ function renderRows() {
     const groups = ProposalGroups.group(f);
     const makers = f.kind==='range_add' ? ProposalGroups.rangeMakers(f) : [];
     const conflict = f.kind==='range_add' ? makers.some(m=>m.variants.length>1) : groups.length > 1;
-    const status = f.approved != null ? 'approved' : conflict ? 'conflict' : f.proposals.length ? 'pending' : 'manual';
-    const label = {approved:'Aprobado',conflict:f.kind==='manufacturer'?'Fabricantes por revisar':'Opciones para elegir',pending:makers.length>1?makers.length+' fabricantes':groups[0]?.members.length>1?'Fuentes agrupadas':'Por revisar',manual:'Sin propuesta'}[status];
+    const status = f.approved != null ? 'approved' : f.rejected ? 'manual' : conflict ? 'conflict' : f.proposals.length ? 'pending' : 'manual';
+    const label = f.rejected && f.approved == null ? 'Quitado' : {approved:'Aprobado',conflict:f.kind==='manufacturer'?'Fabricantes por revisar':'Opciones para elegir',pending:makers.length>1?makers.length+' fabricantes':groups[0]?.members.length>1?'Fuentes agrupadas':'Por revisar',manual:'Sin propuesta'}[status];
     const allVerified = f.proposals.length && f.proposals.every(p=>p.verified);
     const after = f.approved ?? (f.proposals.length ? '' : '—');
     const provenance = f.kind==='manufacturer' ? groups.map(g=>makerCard(f,g)).join('') : groups.map((g,gi)=> {
@@ -186,17 +222,18 @@ async function navigate(page) {
   currentPage = page;
   document.querySelectorAll('.page').forEach(el => el.classList.add('hidden'));
   $(page + '-page').classList.remove('hidden');
-  document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === page));
-  $('breadcrumb').textContent = {workspace:'Especificaciones técnicas', settings:'Configuración', catalog:'Proveedores y fabricantes', history:'Historial de análisis'}[page];
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === (page === 'review' ? 'workspace' : page)));
+  $('breadcrumb').textContent = {workspace:'Especificaciones técnicas', review:'Revisión en el documento', settings:'Configuración', catalog:'Proveedores y fabricantes', history:'Historial de análisis'}[page];
+  document.body.classList.toggle('reviewing', page === 'review');
+  if (page === 'review') renderReview();
   if (page === 'history') loadHistory();
+  if (page === 'settings') loadKeysHealth();
   if (page === 'settings') {
     $('settings-folder').value = state.settings.salida || '';
     $('settings-applicant').value = state.settings.solicitante || '';
     $('settings-area').value = state.settings.area || '';
     $('settings-template').value = state.settings.plantilla || 'AS-REG-018 · Plantilla incluida';
     $('settings-renderer').value = state.settings.renderizador || '';
-    updateProviderUI();
-    renderKeysList();
   }
   if (page === 'catalog') {
     try {
@@ -223,7 +260,7 @@ function renderHistory(current = state?.history_id) {
   document.querySelectorAll('.history-open').forEach(b => b.onclick = async () => {
     if (state.busy) return toast('Espera a que termine el análisis en curso.', true);
     if (state.word && !state.history_id && state.approved_count && !confirm('Tienes aprobaciones sin guardar en el historial. ¿Reabrir de todos modos?')) return;
-    try {await perform('history_open', {id: b.dataset.id}); await navigate('workspace'); showTab('changes'); toast('Análisis reabierto con sus propuestas y aprobaciones.');} catch {}
+    try {await perform('history_open', {id: b.dataset.id}); showTab('changes'); openReview(); toast('Análisis reabierto con sus propuestas y aprobaciones.');} catch {}
   });
   document.querySelectorAll('.history-delete').forEach(b => b.onclick = async () => {
     if (!confirm('¿Eliminar este análisis del historial? Se borran sus copias locales; los expedientes exportados no se tocan.')) return;
@@ -407,7 +444,7 @@ function openExport() {
   $('export-dialog').showModal();
 }
 document.querySelectorAll('.nav-item').forEach(button => button.onclick = () => navigate(button.dataset.page));
-$('demo-button').onclick = async () => {try {await perform('demo');showTab('changes');toast('Ejemplo cargado. Pulsa Analizar documentos o usa Cambio manual.');}catch{}};
+if ($('demo-button')) $('demo-button').onclick = async () => {try {await perform('demo');showTab('changes');toast('Ejemplo cargado. Pulsa Analizar documentos o usa Cambio manual.');}catch{}};
 $('word-input').onchange = async e => {await upload('word',e.target.files);e.target.value='';};
 $('pdf-input').onchange = async e => {await upload('pdfs',e.target.files);e.target.value='';};
 $('template-input').onchange = e => upload('template',e.target.files);
@@ -456,145 +493,453 @@ $('approve-button').onclick = async () => {
 $('settings-pick-folder').onclick = () => pickFolder('settings-folder');
 $('export-pick-folder').onclick = () => pickFolder('export-folder');
 $('save-settings').onclick = async () => {try{await perform('settings',{salida:$('settings-folder').value,solicitante:$('settings-applicant').value,area:$('settings-area').value,renderizador:$('settings-renderer').value});toast('Preferencias guardadas.');}catch{}};
-const PROVIDER_MODELS = {
-  gemini: [
-    {value: 'gemini-3.5-flash', label: 'gemini-3.5-flash (Recomendado / Gratis)'},
-    {value: 'gemini-2.5-flash', label: 'gemini-2.5-flash'},
-    {value: 'gemini-2.0-flash', label: 'gemini-2.0-flash'},
-    {value: 'gemini-2.0-flash-lite', label: 'gemini-2.0-flash-lite'}
-  ],
-  groq: [
-    {value: 'openai/gpt-oss-120b', label: 'openai/gpt-oss-120b (Recomendado)'},
-    {value: 'llama-3.3-70b-versatile', label: 'llama-3.3-70b-versatile'},
-    {value: 'llama-3.1-8b-instant', label: 'llama-3.1-8b-instant'}
-  ]
-};
-
-function updateProviderUI() {
-  const provider = $('service-provider')?.value || 'gemini';
-  const select = $('model-select');
-  const free = $('model-free');
-  if (!select || !free) return;
-  if (provider === 'openrouter') {
-    select.classList.add('hidden');
-    free.classList.remove('hidden');
-    free.value = state?.settings?.openrouter_model || 'google/gemini-2.5-flash';
-  } else {
-    select.classList.remove('hidden');
-    free.classList.add('hidden');
-    const models = PROVIDER_MODELS[provider] || [];
-    select.innerHTML = models.map(m => `<option value="${esc(m.value)}">${esc(m.label)}</option>`).join('');
-    const current = provider === 'gemini' ? (state?.settings?.modelo || 'gemini-3.5-flash') : (state?.settings?.groq_model || 'openai/gpt-oss-120b');
-    if (models.some(m => m.value === current)) {
-      select.value = current;
+/* Vista de revisión en el documento: el Word se muestra como si se aprobaran todos los cambios
+   incluidos; a la izquierda, cada cambio con su color para marcarlo conforme o quitarlo. */
+const PALETTE_SIZE = 10;
+let reviewFilter = 'all';
+let activeChange = null;
+let previewSignature = '';
+let previewTimer = null;
+let previewSkipped = {};
+let historyEdited = false;
+/* ---- Fabricantes y proveedores detectados: se deciden primero; los rangos de A dependen de ellos ---- */
+const ROLE_KEYS = [['fabricante', 'Fabricante'], ['proveedor', 'Proveedor'], ['nombre comercial', 'Nombre Comercial'], ['tiempo de vida util', 'Tiempo de Vida útil'], ['almacenamiento', 'Almacenamiento']];
+const foldText = v => String(v ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const GENERIC_WORDS = new Set(['co', 'ltd', 'limited', 'inc', 'llc', 'corp', 'corporation', 'sac', 'srl', 'eirl', 'gmbh', 'pvt', 'plc', 'spa', 'company', 'the', 'del', 'and', 'materials', 'material', 'technology', 'technologies', 'chemical', 'chemicals', 'industry', 'industries', 'industrial', 'trade', 'trading', 'group', 'international', 'pharma', 'chem', 'peru', 'quimica', 'quimicos', 'new']);
+const nameTokens = n => foldText(n).split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !GENERIC_WORDS.has(t));
+const cleanValue = v => String(v ?? '').replace(/^\s*:\s*/, '').trim();
+let makerChoices = {makers: {}};
+let makerDirty = false;
+let makerSaveTimer = null;
+// Mismo fabricante con otro nombre (TINCI ↔ Guangzhou Tinci Materials Technology Co., Ltd.).
+function matchExisting(name) {
+  const tokens = nameTokens(name);
+  if (!tokens.length) return null;
+  return (state.manufacturers || []).find(m => {
+    const t = nameTokens(m.name);
+    return t.length && (t.every(x => tokens.includes(x)) || tokens.every(x => t.includes(x)));
+  }) || null;
+}
+const makerField = () => state?.fields.find(f => f.kind === 'manufacturer');
+function existingField(number, role) {
+  return state.fields.find(f => f.section === 'B' && f.kind === 'text' && f.manufacturer_number === number && foldText(f.label.split(' · ')[0]).trim() === role);
+}
+function syncMakerChoices() {
+  // Solo se adopta la copia del servidor si no es más antigua que la local (evita que un refresco pise un cambio).
+  const server = state?.maker_choices || {};
+  if (makerDirty || (server.rev || 0) < (makerChoices.rev || 0)) return;
+  makerChoices = JSON.parse(JSON.stringify(server));
+  makerChoices.makers = makerChoices.makers || {};
+}
+function makerEntries() {
+  const f = makerField();
+  if (!f || !f.proposals.length) return [];
+  return ProposalGroups.group(f).map(g => {
+    const key = ProposalGroups.entityKey(g.maker);
+    const rows = ProposalGroups.mergeManufacturer(g);
+    const detected = {};
+    rows.forEach(r => { if (!r.key.startsWith('pa:')) detected[r.key] = r.options.map(o => o.value); });
+    const extra = rows.filter(r => r.key.startsWith('pa:')).map(r => r.role + ': ' + r.options[0].value);
+    const match = matchExisting(g.maker);
+    const saved = makerChoices.makers[key] || {};
+    const choice = {include: true, existing: match ? match.number : null, supplierMode: 'add', ...saved,
+      values: {...Object.fromEntries(ROLE_KEYS.map(([k]) => [k, detected[k]?.[0] || ''])), ...(saved.values || {})},
+      update: {...(saved.update || {})}};
+    const roles = [];
+    g.members.forEach(p => (p.roles || []).forEach(r => {
+      if (!roles.some(x => x.rol === r.rol && ProposalGroups.entityKey(x.nombre) === ProposalGroups.entityKey(r.nombre))) roles.push(r);
+    }));
+    return {key, maker: g.maker, detected, extra, choice, roles, suggested: match, sources: g.members};
+  });
+}
+function makersConfirmed() {
+  const f = makerField();
+  return !!makerChoices.confirmed || !!(f && f.approved != null);
+}
+// Resultado de la selección: bloques nuevos en B, cambios en bloques existentes y fabricantes incluidos.
+function makerPlan() {
+  const plan = {value: '', derived: {}, makers: {}, warnings: {}};
+  const blocks = [];
+  makerEntries().forEach(e => {
+    const c = e.choice, v = c.values;
+    const existing = c.existing != null ? (state.manufacturers || []).find(m => m.number === c.existing) : null;
+    plan.makers[e.key] = c.include ? {existing: existing ? existing.number : null, name: existing ? existing.name : (v.fabricante || e.maker).trim()} : null;
+    if (!c.include) return;
+    if (!existing) {
+      blocks.push(ROLE_KEYS.filter(([k]) => (v[k] || '').trim()).map(([k, label]) => label + ': ' + v[k].trim()).concat(e.extra).join('\n'));
+      return;
     }
+    ROLE_KEYS.slice(1).forEach(([k]) => {
+      const value = (v[k] || '').trim();
+      if (!value) return;
+      const field = existingField(existing.number, k);
+      if (!field) {
+        if (k === 'proveedor') plan.warnings[e.key] = 'El bloque (' + existing.number + ') no tiene fila de Proveedor en el Word; agrégala manualmente.';
+        return;
+      }
+      const current = cleanValue(field.before);
+      let next;
+      if (k === 'proveedor') {
+        if (current.split('/').some(x => ProposalGroups.entityKey(x) === ProposalGroups.entityKey(value))) return;
+        next = c.supplierMode === 'add' && current ? current + ' / ' + value : value;
+      } else {
+        if (!c.update[k] || ProposalGroups.entityKey(current) === ProposalGroups.entityKey(value)) return;
+        next = value;
+      }
+      plan.derived[field.id] = ': ' + next;
+    });
+  });
+  plan.value = blocks.join('\n\n');
+  return plan;
+}
+// Líneas de rango por fabricante, según la selección: se quitan las de fabricantes no incluidos.
+function planRangeLines(f, plan) {
+  const seen = new Set();
+  return ProposalGroups.rangeMakers(f).flatMap(m => {
+    let line = {maker: m.maker, value: m.variants[0].value, isNew: false};
+    if (m.key in plan.makers) {
+      const target = plan.makers[m.key];
+      if (!target) return [];
+      line = {...line, maker: target.name, isNew: target.existing == null};
+    }
+    // Dos fabricantes detectados que apuntan al mismo bloque del Word aportan un solo rango (el primero).
+    const key = ProposalGroups.entityKey(line.maker);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [line];
+  });
+}
+function saveMakerChoices(rerender = true) {
+  makerDirty = true;
+  makerChoices.rev = Date.now();
+  clearTimeout(makerSaveTimer);
+  makerSaveTimer = setTimeout(async () => {
+    try { await api('maker_choices', {choices: makerChoices}); } catch (e) { toast(e.message, true); }
+    makerDirty = false;
+  }, 500);
+  if (rerender) { reviewSignature = ''; renderReview(); } else schedulePreview();
+}
+function updateChoice(key, change) {
+  const entry = makerEntries().find(e => e.key === key);
+  if (!entry) return;
+  makerChoices.makers[key] = {...entry.choice, ...change, values: {...entry.choice.values, ...(change.values || {})}, update: {...entry.choice.update, ...(change.update || {})}};
+}
+async function confirmMakers() {
+  const f = makerField(), plan = makerPlan();
+  const ids = Object.keys(plan.derived);
+  try {
+    if (plan.value) await api('approve', {id: f.id, value: plan.value});
+    else await api('reject', {id: f.id});
+    for (const id of ids) await api('approve', {id, value: plan.derived[id]});
+    makerChoices.confirmed = true; makerChoices.derivedIds = ids; makerChoices.rev = Date.now();
+    clearTimeout(makerSaveTimer);
+    await api('maker_choices', {choices: makerChoices});
+    makerDirty = false;
+    await refresh();
+    toast(Object.values(plan.makers).some(Boolean) ? 'Fabricantes confirmados. Revisa ahora los rangos de la sección A.' : 'Ningún fabricante se incorpora; sus cambios de la sección A se quitaron.');
+    return true;
+  } catch (e) { toast(e.message, true); await refresh(); return false; }
+}
+async function unconfirmMakers() {
+  const f = makerField();
+  // Los rangos aprobados dependen de la selección: vuelven a quedar por revisar.
+  const ranges = state.fields.filter(x => x.kind === 'range_add' && x.approved != null).map(x => x.id);
+  await api('unapprove', {ids: [f.id, ...(makerChoices.derivedIds || []), ...ranges]});
+  makerChoices.confirmed = false; makerChoices.derivedIds = []; makerChoices.rev = Date.now();
+  await api('maker_choices', {choices: makerChoices});
+  makerDirty = false;
+  await refresh();
+}
+const existingName = n => (state.manufacturers || []).find(m => m.number === n)?.name || '';
+function makerEditor(f) {
+  const entries = makerEntries(), plan = makerPlan(), locked = makersConfirmed();
+  const next = Math.max(0, ...existingNumbers());
+  let counter = 0;
+  return '<div class="maker-editor">' + entries.map(e => {
+    const c = e.choice, k = esc(e.key), dis = locked ? ' disabled' : '';
+    const newNumber = c.include && c.existing == null ? next + (++counter) : null;
+    const chips = e.roles.map(r => '<span class="role-chip" title="' + esc(r.motivo || '') + '"><b>' + esc(r.rol) + '</b> ' + esc(r.nombre) + ' <small>' + esc([r.pais, r.fuente === 'Google' ? 'verificado en Google' : r.fuente === 'IA' ? 'validado por IA' : 'reglas'].filter(Boolean).join(' · ')) + '</small></span>').join('');
+    const fields = ROLE_KEYS.map(([role, label]) => {
+      if (role === 'fabricante' && c.existing != null) return '';
+      const options = e.detected[role] || [];
+      const current = c.existing != null ? existingField(c.existing, role) : null;
+      const list = options.length > 1 ? '<datalist id="dl-' + k + '-' + role.replace(/\s/g, '') + '">' + options.map(o => '<option value="' + esc(o) + '">').join('') + '</datalist>' : '';
+      let extra = '';
+      if (c.existing != null && current) {
+        extra = '<small class="mk-current">Actual: ' + esc(cleanValue(current.before) || '—') + '</small>';
+        if (role === 'proveedor') extra += '<span class="mk-inline"><label><input type="radio" name="sm-' + k + '" class="mk-supplier" data-key="' + k + '" value="add"' + (c.supplierMode !== 'replace' ? ' checked' : '') + dis + '> Agregar como otro proveedor</label><label><input type="radio" name="sm-' + k + '" class="mk-supplier" data-key="' + k + '" value="replace"' + (c.supplierMode === 'replace' ? ' checked' : '') + dis + '> Reemplazar</label></span>';
+        else extra += '<label class="mk-inline"><input type="checkbox" class="mk-update" data-key="' + k + '" data-role="' + role + '"' + (c.update[role] ? ' checked' : '') + dis + '> Actualizar este dato</label>';
+      }
+      return '<label class="mk-field"><span>' + label + (options.length > 1 ? ' <em>' + options.length + ' valores detectados</em>' : '') + '</span><input class="mk-value" data-key="' + k + '" data-role="' + role + '" value="' + esc(c.values[role] || '') + '"' + (list ? ' list="dl-' + k + '-' + role.replace(/\s/g, '') + '"' : '') + dis + '>' + list + extra + '</label>';
+    }).join('');
+    return '<div class="maker-edit' + (c.include ? '' : ' excluded') + '">'
+      + '<label class="mk-head"><input type="checkbox" class="mk-include" data-key="' + k + '"' + (c.include ? ' checked' : '') + dis + '><span>' + esc(e.maker) + '</span></label>'
+      + (chips ? '<div class="role-chips">' + chips + '</div>' : '')
+      + (c.include ? (c.existing != null && existingName(c.existing)
+          ? '<p class="mk-note">Ya está en el Word como (' + c.existing + ') ' + esc(existingName(c.existing)) + ': no se crea otro bloque, solo se actualizan sus datos (por ejemplo, el proveedor). ' + (locked ? '' : '<button type="button" class="text-button mk-as-new" data-key="' + k + '">Es otro fabricante</button>') + '</p>'
+          : '<p class="mk-note">Se agregará como fabricante (' + newNumber + ').' + (e.suggested && !locked ? ' <button type="button" class="text-button mk-as-existing" data-key="' + k + '">Es el (' + e.suggested.number + ') ' + esc(e.suggested.name) + ' del Word</button>' : '') + '</p>')
+        + '<div class="mk-fields">' + fields + '</div>'
+        + (plan.warnings[e.key] ? '<p class="review-hint warn">' + esc(plan.warnings[e.key]) + '</p>' : '')
+        : '<p class="review-hint">No se incorpora. Sus cambios en la sección A se quitan automáticamente.</p>')
+      + '</div>';
+  }).join('') + '</div>';
+}
+function bindMakerEditor() {
+  document.querySelectorAll('.maker-editor').forEach(box => box.onclick = e => e.stopPropagation());
+  document.querySelectorAll('.mk-include').forEach(i => i.onchange = () => { updateChoice(i.dataset.key, {include: i.checked}); saveMakerChoices(); });
+  document.querySelectorAll('.mk-as-new').forEach(b => b.onclick = () => { updateChoice(b.dataset.key, {existing: null}); saveMakerChoices(); });
+  document.querySelectorAll('.mk-as-existing').forEach(b => b.onclick = () => {
+    const entry = makerEntries().find(x => x.key === b.dataset.key);
+    if (entry?.suggested) { updateChoice(b.dataset.key, {existing: entry.suggested.number}); saveMakerChoices(); }
+  });
+  document.querySelectorAll('.mk-supplier').forEach(i => i.onchange = () => { updateChoice(i.dataset.key, {supplierMode: i.value}); saveMakerChoices(); });
+  document.querySelectorAll('.mk-update').forEach(i => i.onchange = () => { updateChoice(i.dataset.key, {update: {[i.dataset.role]: i.checked}}); saveMakerChoices(); });
+  document.querySelectorAll('.mk-value').forEach(i => i.oninput = () => { updateChoice(i.dataset.key, {values: {[i.dataset.role]: i.value}}); saveMakerChoices(false); });
+  document.querySelectorAll('.mk-confirm').forEach(b => b.onclick = e => { e.stopPropagation(); confirmMakers(); });
+  document.querySelectorAll('.mk-unlock').forEach(b => b.onclick = async e => { e.stopPropagation(); try { await unconfirmMakers(); } catch (err) { toast(err.message, true); } });
+  document.querySelectorAll('.mk-none').forEach(b => b.onclick = e => { e.stopPropagation(); makerEntries().forEach(x => updateChoice(x.key, {include: false})); saveMakerChoices(); });
+}
+
+let reviewSignature = '';
+function reviewFields() {
+  return (state?.fields || []).filter(f => f.proposals.length || f.approved != null || f.rejected)
+    .sort((a, b) => (b.kind === 'manufacturer') - (a.kind === 'manufacturer') || Number(a.id) - Number(b.id));
+}
+function reviewStatus(f, plan = makerPlan()) {
+  if (f.kind === 'manufacturer') return makersConfirmed() ? 'approved' : f.rejected ? 'rejected' : 'pending';
+  if (f.approved != null) return 'approved';
+  if (f.rejected) return 'rejected';
+  if (f.kind === 'range_add' && !planRangeLines(f, plan).length) return 'rejected';
+  return 'pending';
+}
+function changeColors() {
+  const colors = {};
+  reviewFields().forEach((f, i) => colors[f.id] = i % PALETTE_SIZE);
+  const maker = makerField();
+  if (maker && maker.id in colors) Object.keys(makerPlan().derived).concat(makerChoices.derivedIds || []).forEach(id => colors[id] = colors[maker.id]);
+  return colors;
+}
+// Valor que se muestra en el documento para un cambio por revisar: la primera opción de cada fabricante.
+function draftValue(f, plan = makerPlan()) {
+  if (f.approved != null) return f.approved;
+  if (f.rejected || !f.proposals.length) return null;
+  if (f.kind === 'manufacturer') return plan.value || null;
+  if (f.kind === 'range_add') {
+    const lines = planRangeLines(f, plan);
+    return lines.length ? lines.map(l => 'Fabricante: ' + l.maker + ' | ' + l.value).join('\n') : null;
+  }
+  const groups = ProposalGroups.group(f);
+  return f.proposals[groups[0].variants[0].index].value;
+}
+function draftChanges() {
+  const plan = makerPlan(), draft = {};
+  reviewFields().forEach(f => { if (reviewStatus(f, plan) === 'pending') { const v = draftValue(f, plan); if (v) draft[f.id] = v; } });
+  if (!makersConfirmed()) Object.assign(draft, plan.derived);
+  return draft;
+}
+function optionCount(f) {
+  if (f.kind === 'range_add') return ProposalGroups.rangeMakers(f).filter(m => m.variants.length > 1).length;
+  return Math.max(0, ProposalGroups.group(f).length - 1);
+}
+function shownValue(f, plan) {
+  const value = draftValue(f, plan) ?? (f.proposals.length ? f.proposals[0].value : '');
+  if (f.kind === 'range_add') return ProposalGroups.rangeResult(f.cell, existingNumbers(), state.manufacturer_numbers || {}, value).text;
+  return value;
+}
+function renderReview() {
+  if (!state || currentPage !== 'review') return;
+  syncMakerChoices();
+  const fields = reviewFields(), colors = changeColors(), plan = makerPlan();
+  const signature = JSON.stringify([fields.map(f => [f.id, f.approved, f.rejected, f.proposals.length]), makerChoices, reviewFilter, previewSkipped, activeChange, state.manufacturer_numbers, state.busy]);
+  if (signature === reviewSignature) return schedulePreview();
+  // No se reconstruye la lista mientras se escribe en un dato de fabricante.
+  if (document.activeElement?.classList.contains('mk-value')) return schedulePreview();
+  reviewSignature = signature;
+  const statuses = Object.fromEntries(fields.map(f => [f.id, reviewStatus(f, plan)]));
+  const counts = {all: fields.length, pending: 0, approved: 0, rejected: 0};
+  fields.forEach(f => counts[statuses[f.id]]++);
+  Object.entries(counts).forEach(([k, v]) => $('filter-' + k).textContent = v);
+  document.querySelectorAll('.review-filters .chip').forEach(b => b.classList.toggle('active', b.dataset.filter === reviewFilter));
+  $('review-summary').textContent = fields.length
+    ? counts.approved + ' conforme(s) · ' + counts.pending + ' por revisar · ' + counts.rejected + ' quitado(s). Solo los conformes se exportan.'
+    : 'No hay cambios propuestos. Usa «Cambio manual» en el expediente para editar un campo.';
+  $('review-accept-all').disabled = state.busy || !counts.pending;
+  $('review-export').disabled = state.busy || !(counts.approved + counts.pending);
+  const pendingMakers = makerField()?.proposals.length && !makersConfirmed();
+  const visible = fields.filter(f => reviewFilter === 'all' || statuses[f.id] === reviewFilter);
+  $('review-list').innerHTML = visible.length ? visible.map(f => {
+    const status = statuses[f.id], skipped = previewSkipped[f.id];
+    if (f.kind === 'manufacturer') {
+      const actions = makersConfirmed()
+        ? '<button class="secondary small mk-unlock">Cambiar selección</button>'
+        : '<button class="primary small mk-confirm">✓ Confirmar fabricantes</button><button class="secondary small mk-none">Ninguno va</button>';
+      return '<li class="review-item maker-item is-' + status + (activeChange === f.id ? ' active' : '') + '" data-id="' + esc(f.id) + '">'
+        + '<span class="swatch chg-' + colors[f.id] + '" aria-hidden="true"></span><div class="review-item-body">'
+        + '<div class="review-item-top"><span class="eyebrow">SECCIÓN B · PRIMERO</span><span class="status ' + (status === 'approved' ? 'approved' : 'pending') + '">' + (status === 'approved' ? 'Confirmado' : 'Por revisar') + '</span></div>'
+        + '<strong class="review-item-title">Fabricantes y proveedores detectados</strong>'
+        + '<p class="review-hint">Marca los que van y corrige fabricante o proveedor si hace falta. Los rangos de la sección A de un fabricante que no va se quitan solos.</p>'
+        + makerEditor(f)
+        + '<div class="review-actions">' + actions + '<button class="text-button review-detail" data-id="' + esc(f.id) + '">Ver respaldo</button></div>'
+        + '</div></li>';
+    }
+    const options = optionCount(f);
+    const lines = f.kind === 'range_add' ? planRangeLines(f, plan) : [];
+    const waits = f.kind === 'range_add' && pendingMakers && lines.some(l => l.isNew);
+    const autoRemoved = f.kind === 'range_add' && !f.rejected && f.approved == null && !lines.length;
+    const label = autoRemoved ? 'No aplica' : {approved: 'Conforme', rejected: 'Quitado', pending: 'Por revisar'}[status];
+    const before = beforeText(f) || '—';
+    const actions = autoRemoved ? ''
+      : status === 'rejected'
+      ? '<button class="secondary small review-restore" data-id="' + esc(f.id) + '">Volver a incluir</button>'
+      : (status === 'approved' ? '' : '<button class="primary small review-ok" data-id="' + esc(f.id) + '"' + (waits ? ' disabled title="Confirma primero los fabricantes"' : '') + '>✓ Conforme</button>')
+        + '<button class="secondary small review-remove" data-id="' + esc(f.id) + '">Quitar</button>';
+    return '<li class="review-item is-' + status + (activeChange === f.id ? ' active' : '') + '" data-id="' + esc(f.id) + '">'
+      + '<span class="swatch chg-' + colors[f.id] + '" aria-hidden="true"></span><div class="review-item-body">'
+      + '<div class="review-item-top"><span class="eyebrow">' + (f.section === 'ID' ? 'IDENTIFICACIÓN' : 'SECCIÓN ' + esc(f.section)) + '</span><span class="status ' + {approved: 'approved', rejected: 'manual', pending: 'pending'}[status] + '">' + label + '</span></div>'
+      + '<strong class="review-item-title">' + esc(f.label) + '</strong>'
+      + (autoRemoved ? '<p class="review-hint">Su fabricante no se incorpora, así que este cambio no se aplica.</p>'
+        : '<div class="review-diff">' + (['manufacturer', 'additional', 'add', 'range_add'].includes(f.kind) ? '' : '<del>' + esc(before) + '</del>') + '<ins>' + esc(shownValue(f, plan) || '—') + '</ins></div>')
+      + (waits && status === 'pending' ? '<p class="review-hint">Se podrá marcar cuando confirmes los fabricantes.</p>' : '')
+      + (options && status === 'pending' ? '<p class="review-hint">Hay ' + options + ' alternativa(s); se muestra la primera. Elige otra en «Ver respaldo y editar».</p>' : '')
+      + (skipped && status === 'pending' ? '<p class="review-hint warn">No se aplica en la vista: ' + esc(skipped) + '</p>' : '')
+      + '<div class="review-actions">' + actions + '<button class="text-button review-detail" data-id="' + esc(f.id) + '">Ver respaldo y editar</button></div>'
+      + '</div></li>';
+  }).join('') : '<li class="review-empty">' + (fields.length ? 'No hay cambios en este filtro.' : 'Sin cambios para revisar.') + '</li>';
+  document.querySelectorAll('.review-ok').forEach(b => b.onclick = e => { e.stopPropagation(); acceptChange(b.dataset.id); });
+  document.querySelectorAll('.review-remove').forEach(b => b.onclick = async e => { e.stopPropagation(); try { await perform('reject', {id: b.dataset.id}); } catch {} });
+  document.querySelectorAll('.review-restore').forEach(b => b.onclick = async e => { e.stopPropagation(); try { await perform('restore', {id: b.dataset.id}); } catch {} });
+  document.querySelectorAll('.review-detail').forEach(b => b.onclick = e => { e.stopPropagation(); editField(b.dataset.id); });
+  document.querySelectorAll('.review-item').forEach(li => li.onclick = () => focusChange(li.dataset.id));
+  bindMakerEditor();
+  schedulePreview();
+}
+async function acceptChange(id) {
+  const f = state.fields.find(x => x.id === id);
+  const value = f && draftValue(f);
+  if (!value) return;
+  try { await perform('approve', {id, value}); toast('Cambio marcado como conforme.'); }
+  catch { if (f.kind === 'range_add') editField(id); }
+}
+async function acceptAll() {
+  $('review-accept-all').disabled = true;
+  const maker = makerField();
+  if (maker?.proposals.length && !makersConfirmed() && !(await confirmMakers())) return;
+  const failed = [];
+  const pending = reviewFields().filter(f => f.kind !== 'manufacturer' && reviewStatus(f) === 'pending').sort((a, b) => (a.kind === 'range_add') - (b.kind === 'range_add'));
+  for (const f of pending) {
+    // El estado se relee: los rangos dependen de los fabricantes recién aprobados.
+    const current = state.fields.find(x => x.id === f.id);
+    const value = current && draftValue(current);
+    if (!value) continue;
+    try { await api('approve', {id: f.id, value}); await refresh(); }
+    catch (e) { failed.push(f.label + ': ' + e.message); }
+  }
+  await refresh();
+  toast(failed.length ? failed.length + ' cambio(s) requieren tu revisión: ' + failed[0] : 'Todos los cambios incluidos quedaron conformes.', !!failed.length);
+}
+function focusChange(id) {
+  activeChange = id;
+  document.querySelectorAll('.review-item').forEach(li => li.classList.toggle('active', li.dataset.id === id));
+  const target = document.querySelector('#word-preview [data-change="' + CSS.escape(id) + '"]');
+  if (target) {
+    target.scrollIntoView({behavior: 'smooth', block: 'center'});
+    target.classList.remove('flash'); void target.offsetWidth; target.classList.add('flash');
+  } else if ($('preview-mode').value === 'pages') {
+    toast('En Páginas reales ubica el cambio por su color. La Vista de contenido permite saltar a cada cambio.');
   }
 }
-
-function renderKeysList() {
-  const container = $('keys-list');
-  if (!container || !state?.keys_count) return;
-  const counts = state.keys_count;
-  const items = [
-    {id: 'gemini', name: 'Google Gemini', count: counts.gemini || 0},
-    {id: 'groq', name: 'Groq', count: counts.groq || 0},
-    {id: 'openrouter', name: 'OpenRouter', count: counts.openrouter || 0}
-  ];
-  container.innerHTML = '<div style="margin-top:10px;font-size:13px;display:flex;gap:10px;flex-wrap:wrap;">' +
-    items.map(it => `<span style="background:${it.count ? '#e8f5e9':'#f5f5f5'};color:${it.count ? '#2e7d32':'#757575'};padding:4px 8px;border-radius:6px;font-weight:500;">${esc(it.name)}: ${it.count} clave(s)</span>`).join('') +
-    '</div>';
+function previewPayload() {
+  return {fecha: revisionDate, add_history: addHistory, history_text: historyEdited ? historyText : null,
+          mode: $('preview-mode').value, draft: draftChanges(), colors: changeColors()};
 }
-
-if ($('service-provider')) {
-  $('service-provider').onchange = () => updateProviderUI();
-}
-
-if ($('add-key')) {
-  $('add-key').onclick = async () => {
-    try {
-      const provider = $('service-provider').value;
-      const keyVal = $('service-key').value.trim();
-      const modelVal = provider === 'openrouter' ? $('model-free').value.trim() : $('model-select').value;
-
-      if (keyVal) {
-        await api('credentials', {[provider]: keyVal});
-      }
-
-      if (provider === 'gemini') {
-        await perform('settings', {modelo: modelVal});
-      } else if (provider === 'openrouter') {
-        await perform('settings', {openrouter_model: modelVal});
-      } else if (provider === 'groq') {
-        await perform('settings', {groq_model: modelVal});
-      }
-
-      $('service-key').value = '';
-      toast(keyVal ? 'Clave y modelo guardados correctamente.' : 'Modelo guardado.');
-      await poll();
-    } catch(e) {
-      toast(e.message, true);
-    }
-  };
-}
-async function ensureHistory() {
-  const signature = JSON.stringify([state.word, state.fields.filter(f=>f.approved!=null).map(f=>[f.id,f.approved])]);
-  if (signature !== historySignature) {
-    historyText = (await api('history')).text;
-    historySignature = signature;
-  }
+function schedulePreview(force = false) {
+  if (currentPage !== 'review' || !state?.word) return;
+  const payload = previewPayload();
+  const signature = JSON.stringify([payload, state.fields.filter(f => f.approved != null).map(f => [f.id, f.approved])]);
+  if (!force && signature === previewSignature) return;
+  previewSignature = signature;
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(updatePreview, force ? 0 : 450);
 }
 function previewLoading() {
-  $('word-preview').setAttribute('aria-busy','true');
-  $('word-preview').innerHTML = '<div class="preview-message" role="status"><span class="spinner"></span><h3>Preparando vista previa…</h3><p>Estamos aplicando los cambios aprobados a una copia del Word.</p></div>';
+  $('word-preview').setAttribute('aria-busy', 'true');
+  if (!$('word-preview').querySelector('.document-page, table, p'))
+    $('word-preview').innerHTML = '<div class="preview-message" role="status"><span class="spinner"></span><h3>Preparando el documento…</h3><p>Aplicamos los cambios incluidos a una copia del Word.</p></div>';
+  else $('word-preview').classList.add('refreshing');
 }
 async function updatePreview() {
   const request = ++previewRequest;
-  historyText = $('history-text').value;
   addHistory = $('history-enabled').checked;
-  revisionDate = $('preview-date').value;
+  revisionDate = $('preview-date').value || revisionDate;
   $('preview-error').textContent = '';
   previewLoading();
   $('refresh-preview').disabled = true;
   try {
-    const result = await api('preview', {fecha:revisionDate,add_history:addHistory,history_text:historyText,mode:$('preview-mode').value});
+    const payload = previewPayload();
+    if (!historyEdited) {
+      historyText = (await api('history', {draft: payload.draft})).text;
+      if (request !== previewRequest) return;
+      $('history-text').value = historyText;
+    }
+    const result = await api('preview', payload);
     if (request !== previewRequest) return;
-    const notice = !state.approved_count ? 'Documento vigente: todavía no has aprobado cambios. Las propuestas no se aplican hasta que las apruebes.' : addHistory && !historyText.trim() ? 'Vista de los cambios aprobados. Completa la revisión histórica o desactiva su registro antes de exportar.' : '';
-    $('word-preview').innerHTML = (notice ? '<div class="preview-notice" role="status">'+esc(notice)+'</div>' : '') + (result.pages ? result.pages.map((src,i)=>'<figure class="document-page"><figcaption>Página '+(i+1)+' · '+esc(result.renderer)+'</figcaption><img src="'+src+'" alt="Página '+(i+1)+' del Word"></figure>').join('') : result.html);
-  } catch(e) {
+    previewSkipped = Object.fromEntries((result.skipped || []).map(s => [s.id, s.error]));
+    const pending = Object.keys(payload.draft).length;
+    const notice = !reviewFields().length ? 'Documento vigente: no hay cambios propuestos.'
+      : addHistory && !(historyEdited ? historyText : $('history-text').value).trim() ? 'Completa la revisión histórica o desactiva su registro antes de exportar.' : '';
+    $('review-doc-info').textContent = pending ? pending + ' cambio(s) por revisar se muestran como si estuvieran aprobados. Cada color corresponde a una tarjeta.' : 'Cada cambio incluido se resalta con el color de su tarjeta.';
+    $('word-preview').innerHTML = (notice ? '<div class="preview-notice" role="status">' + esc(notice) + '</div>' : '')
+      + (result.pages ? result.pages.map((src, i) => '<figure class="document-page"><figcaption>Página ' + (i + 1) + ' · ' + esc(result.renderer) + '</figcaption><img src="' + src + '" alt="Página ' + (i + 1) + ' del Word"></figure>').join('') : result.html);
+    renderReviewSkips();
+  } catch (e) {
     if (request !== previewRequest) return;
-    $('preview-error').textContent=e.message;
-    $('word-preview').innerHTML='<div class="preview-message" role="alert"><h3>No se pudo generar la vista previa</h3><p>'+esc(e.message)+'</p><p>Corrige los datos y pulsa Actualizar vista previa para reintentar.</p></div>';
+    previewSignature = '';
+    $('preview-error').textContent = e.message;
+    $('word-preview').innerHTML = '<div class="preview-message" role="alert"><h3>No se pudo generar la vista previa</h3><p>' + esc(e.message) + '</p><p>Quita el cambio que lo provoca, edítalo, o cambia a Vista de contenido y pulsa Actualizar.</p></div>';
   } finally {
-    if (request === previewRequest) {$('word-preview').setAttribute('aria-busy','false');$('refresh-preview').disabled=false;}
+    if (request === previewRequest) { $('word-preview').setAttribute('aria-busy', 'false'); $('word-preview').classList.remove('refreshing'); $('refresh-preview').disabled = false; }
   }
 }
-$('preview-button').onclick = async () => {
-  $('preview-error').textContent='';
-  $('preview-date').value=revisionDate;
-  $('preview-dialog').showModal();
-  previewLoading();
-  try {
-    await ensureHistory();
-    $('history-text').value=historyText;
-    $('history-enabled').checked=addHistory;
-    await updatePreview();
-  } catch(e) {
-    $('preview-error').textContent=e.message;
-    $('word-preview').setAttribute('aria-busy','false');
-    $('word-preview').innerHTML='<div class="preview-message" role="alert"><h3>No se pudo preparar el documento</h3><p>'+esc(e.message)+'</p><p>Pulsa Actualizar vista previa para reintentar.</p></div>';
-  }
+function renderReviewSkips() {
+  // Vuelve a pintar las tarjetas sin pedir otra vista previa.
+  const signature = previewSignature;
+  reviewSignature = '';
+  renderReview();
+  previewSignature = signature;
+  clearTimeout(previewTimer);
+}
+function openReview() {
+  if (!state?.word) return toast('Carga primero la especificación vigente.', true);
+  $('preview-date').value = revisionDate;
+  $('history-enabled').checked = addHistory;
+  previewSignature = '';
+  reviewSignature = '';
+  navigate('review');
+}
+$('preview-button').onclick = openReview;
+$('review-back').onclick = () => navigate('workspace');
+$('review-accept-all').onclick = acceptAll;
+document.querySelectorAll('.review-filters .chip').forEach(b => b.onclick = () => { reviewFilter = b.dataset.filter; renderReview(); });
+$('refresh-preview').onclick = () => schedulePreview(true);
+$('preview-mode').onchange = () => schedulePreview(true);
+$('history-enabled').onchange = () => schedulePreview(true);
+$('preview-date').onchange = () => { revisionDate = $('preview-date').value || revisionDate; schedulePreview(true); };
+$('history-text').oninput = () => { historyEdited = true; historyText = $('history-text').value; };
+$('history-text').onchange = () => schedulePreview(true);
+$('regenerate-history').onclick = () => { historyEdited = false; schedulePreview(true); };
+$('review-export').onclick = async () => {
+  const pending = reviewFields().filter(f => reviewStatus(f) === 'pending').length;
+  if (pending && confirm(pending + ' cambio(s) siguen por revisar. Solo se exportan los conformes.\n\n¿Marcarlos como conformes antes de exportar?')) await acceptAll();
+  if (!state.approved_count) return toast('Marca al menos un cambio como conforme antes de exportar.', true);
+  openExport();
 };
-$('close-preview').onclick=()=>{historyText=$('history-text').value;addHistory=$('history-enabled').checked;revisionDate=$('preview-date').value;$('preview-dialog').close();};
-$('refresh-preview').onclick=updatePreview;
-$('history-enabled').onchange=updatePreview;
-$('regenerate-history').onclick=async()=>{historySignature='';await ensureHistory();$('history-text').value=historyText;await updatePreview();};
-$('export-button').onclick = async () => {try {await ensureHistory();openExport();}catch(e){toast(e.message,true);}};
+$('export-button').onclick = () => openExport();
 $('create-export').onclick = async () => {
   const button=$('create-export');
   try {
     if (!$('export-applicant').value.trim() || !$('export-area').value.trim() || !$('export-date').value || !$('export-folder').value) throw new Error('Completa solicitante, área, fecha y carpeta de destino.');
     button.disabled=true;button.textContent='Creando expediente…';
-    const result=await perform('export',{salida:$('export-folder').value,solicitante:$('export-applicant').value,area:$('export-area').value,fecha:$('export-date').value,add_history:addHistory,history_text:historyText});
+    const result=await perform('export',{salida:$('export-folder').value,solicitante:$('export-applicant').value,area:$('export-area').value,fecha:$('export-date').value,add_history:addHistory,history_text:historyEdited?historyText:null});
     $('export-dialog').close();$('success-path').textContent=result.path;$('success-dialog').showModal();
   }catch(e){$('export-error').textContent=e.message;}finally{button.disabled=false;button.textContent='Crear expediente ↗';}
 };
@@ -608,18 +953,46 @@ async function poll() {
       const failed=state.notes.some(n=>n.type==='error');
       toast(failed?'Algunos documentos requieren atención. Puedes reintentar o editar manualmente. Detalle técnico: Monitor técnico (Ctrl/⌘ + Shift + L).':'Análisis completado. Revisa las propuestas.',failed);
       if(failed&&!state.fields.some(f=>f.proposals.length))showTab('notes');
+      else if(state.fields.some(f=>f.proposals.length)&&currentPage==='workspace')openReview();
     }
   }catch(e){toast(e.message,true);}
   setTimeout(poll,state?.busy?1000:4000);
 }
 poll();
 
-$('load-techniques').onclick=async()=>{try{const r=await api('techniques');$('techniques-list').innerHTML=r.items.map(t=>'<details><summary>'+esc(t.codigo+' · '+t.archivo)+'</summary><pre class="technique-detail">'+esc(t.texto)+'</pre></details>').join('');}catch(e){toast(e.message,true);}};
+/* Técnicas del laboratorio: tabla con búsqueda y filtro por categoría. */
+let techniques = null, techniqueFilter = 'Todas', openTechnique = null;
+async function loadTechniques() {
+  if (techniques) return renderTechniques();
+  $('techniques-list').innerHTML = '<div class="preview-message"><span class="spinner"></span></div>';
+  try { techniques = (await api('techniques')).items; renderTechniques(); }
+  catch (e) { $('techniques-list').innerHTML = ''; toast(e.message, true); }
+}
+function renderTechniques() {
+  const query = foldText($('techniques-search').value);
+  const categories = ['Todas', ...new Set(techniques.map(t => t.categoria))];
+  $('techniques-count').textContent = techniques.length + ' técnicas';
+  $('techniques-filters').innerHTML = categories.map(c => '<button class="chip' + (c === techniqueFilter ? ' active' : '') + '" data-category="' + esc(c) + '">' + esc(c)
+    + ' <span>' + (c === 'Todas' ? techniques.length : techniques.filter(t => t.categoria === c).length) + '</span></button>').join('');
+  $('techniques-filters').querySelectorAll('.chip').forEach(b => b.onclick = () => { techniqueFilter = b.dataset.category; renderTechniques(); });
+  const rows = techniques.filter(t => (techniqueFilter === 'Todas' || t.categoria === techniqueFilter)
+    && (!query || foldText(t.codigo + ' ' + t.titulo + ' ' + t.objetivo).includes(query)));
+  $('techniques-list').innerHTML = rows.length ? '<table class="techniques-table"><thead><tr><th>Código</th><th>Técnica</th><th>Categoría</th><th>Versión</th></tr></thead><tbody>'
+    + rows.map(t => '<tr class="technique-row' + (openTechnique === t.codigo ? ' open' : '') + '" data-code="' + esc(t.codigo) + '">'
+      + '<td><code>' + esc(t.codigo) + '</code>' + (t.en_uso ? '<span class="tech-used">En este Word</span>' : '') + '</td>'
+      + '<td><strong>' + esc(t.titulo) + '</strong><small class="tech-objective">' + esc(t.objetivo || 'Sin objetivo legible en el documento.') + '</small></td>'
+      + '<td><span class="tech-category">' + esc(t.categoria) + '</span></td><td>' + (t.version ? 'V' + esc(t.version) : '—') + '</td></tr>'
+      + (openTechnique === t.codigo ? '<tr class="technique-detail-row"><td colspan="4"><p><b>Objetivo</b>' + esc(t.objetivo || '—') + '</p>'
+        + '<details><summary>Texto leído del documento' + (t.ocr ? ' (OCR)' : '') + '</summary><pre class="technique-detail">' + esc(t.texto) + '</pre></details></td></tr>' : '')).join('')
+    + '</tbody></table>' : '<p class="helper">Ninguna técnica coincide con la búsqueda.</p>';
+  $('techniques-list').querySelectorAll('.technique-row').forEach(r => r.onclick = () => { openTechnique = openTechnique === r.dataset.code ? null : r.dataset.code; renderTechniques(); });
+}
+$('techniques-card').ontoggle = () => { if ($('techniques-card').open) loadTechniques(); };
+$('techniques-search').oninput = () => techniques && renderTechniques();
 
 $('commercial-notes').onclick=()=>showTab('notes');
 $('commercial-manual').onclick=()=>{const f=state.fields.find(f=>f.kind==='manufacturer');if(f)editField(f.id);};
 
-$('preview-mode').onchange=updatePreview;
 let connectionTimer;
 async function refreshConnection(force=false) {
   clearTimeout(connectionTimer);
@@ -675,3 +1048,115 @@ $('monitor-copy').onclick=async()=>{
 };
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='l'){e.preventDefault();toggleMonitor();}});
 try{if(localStorage.getItem('materia-monitor'))toggleMonitor(true);}catch{}
+
+/* Estado de las claves de API: última respuesta de cada clave y pruebas a pedido. */
+const PROVIDERS = [
+  {id: 'gemini', name: 'Google Gemini', setting: 'modelo', fallback: '',
+   hint: 'Lee también PDF escaneados. Si el modelo elegido está saturado o sin cuota, se usan los otros automáticamente.',
+   models: null},
+  {id: 'groq', name: 'Groq', setting: 'groq_model', fallback: 'openai/gpt-oss-120b',
+   hint: 'Muy rápido; solo para PDF con texto seleccionable.',
+   models: [['openai/gpt-oss-120b', 'openai/gpt-oss-120b · recomendado'], ['openai/gpt-oss-20b', 'openai/gpt-oss-20b · más liviano'],
+            ['llama-3.3-70b-versatile', 'llama-3.3-70b-versatile'], ['llama-3.1-8b-instant', 'llama-3.1-8b-instant']]},
+  {id: 'openrouter', name: 'OpenRouter', setting: 'openrouter_model', fallback: '',
+   hint: 'Respaldo con modelos gratuitos de varios proveedores (lista actualizada desde OpenRouter).', models: null},
+];
+const KEY_STATUS = {ok: 'Responde', saturada: 'Saturada', invalida: 'Inválida', error: 'Con error', sin_uso: 'Sin uso aún'};
+let keysHealthTimer = null, keyRows = [], openrouterModels = null, geminiModels = null, keysSignature = '';
+function modelOptions(p) {
+  let options;
+  if (p.id === 'openrouter') {
+    if (!openrouterModels) return '<option value="">Cargando modelos gratuitos…</option>';
+    options = openrouterModels.models.map((m, i) => [m.id, m.name.replace(/\s*\(free\)\s*$/i, '') + (i === 0 ? ' · recomendado' : '') + (m.pdf ? ' · lee PDF' : '') + (m.context ? ' · ' + Math.round(m.context / 1000) + 'k' : '')]);
+  } else if (p.id === 'gemini') {
+    // Lista real de la API (los modelos se retiran con el tiempo); cada modelo tiene su propia cuota diaria.
+    const list = geminiModels?.models?.length ? geminiModels.models : ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash'];
+    options = list.map((m, i) => [m, m + (i === 0 ? ' · recomendado (el más nuevo)' : /lite$/.test(m) ? ' · más rápido' : '')]);
+  } else options = p.models.slice();
+  const value = state?.settings?.[p.setting] || (p.id === 'openrouter' ? options[0]?.[0] : p.fallback);
+  if (value && !options.some(o => o[0] === value)) options.unshift([value, value + ' (actual)']);
+  return options.map(([v, l]) => '<option value="' + esc(v) + '"' + (v === value ? ' selected' : '') + '>' + esc(l) + '</option>').join('')
+    + (p.id === 'openrouter' ? '<option value="__other">Otro modelo…</option>' : '');
+}
+function keyRow(r) {
+  return '<tr><td><code>' + esc(r.masked) + '</code><small>' + esc(r.source) + '</small></td>'
+    + '<td><span class="key-status ' + esc(r.status) + '">' + esc(KEY_STATUS[r.status] || r.status) + '</span>'
+    + (r.status === 'saturada' && r.saturated_at ? '<small>desde ' + esc(formatDate(r.saturated_at)) + '</small>' : '') + '</td>'
+    + '<td>' + (r.last_at ? esc(formatDate(r.last_at)) + '<small>' + esc(r.last_message || '') + (r.last_code ? ' (' + esc(r.last_code) + ')' : '') + (r.last_seconds != null ? ' · ' + esc(r.last_seconds) + ' s' : '') + '</small>' : '—') + (r.detail ? '<small>' + esc(r.detail) + '</small>' : '') + '</td>'
+    + '<td class="key-uses">' + r.ok + ' bien<small>' + r.fail + ' ' + (r.fail === 1 ? 'fallo' : 'fallos') + '</small></td>'
+    + '<td class="key-actions"><button class="secondary small key-test" data-id="' + esc(r.id) + '">Probar</button>'
+    + (r.source === 'configuración' ? '<button class="text-button key-delete" data-id="' + esc(r.id) + '" data-provider="' + esc(r.provider) + '">Eliminar</button>' : '') + '</td></tr>';
+}
+function renderKeysHealth(rows) {
+  keyRows = rows;
+  const counts = rows.reduce((a, r) => (a[r.status] = (a[r.status] || 0) + 1, a), {});
+  const indicator = $('keys-indicator');
+  if (indicator) {
+    const bad = (counts.saturada || 0) + (counts.invalida || 0) + (counts.error || 0), ok = counts.ok || 0;
+    indicator.className = 'keys-indicator' + (rows.length ? '' : ' hidden') + (counts.invalida || counts.error ? ' bad' : counts.saturada ? ' warn' : ' good');
+    indicator.textContent = 'Claves: ' + ok + (ok === 1 ? ' responde' : ' responden') + (bad ? ' · ' + bad + ' con ' + (bad === 1 ? 'problema' : 'problemas') : '');
+  }
+  const box = $('keys-health');
+  // No se redibuja mientras se escribe una clave o se elige un modelo, ni si nada cambió.
+  const signature = JSON.stringify([rows, state?.settings, !!openrouterModels, geminiModels?.models]);
+  if (!box || box.contains(document.activeElement) || signature === keysSignature) return;
+  keysSignature = signature;
+  box.innerHTML = (rows.length ? '' : '<p class="warning">Para comenzar, agrega al menos una clave de API. Gemini es la opción recomendada.</p>')
+    + PROVIDERS.map(p => {
+      const mine = rows.filter(r => r.provider === p.id);
+      return '<div class="provider-block"><div class="provider-head"><div><strong>' + esc(p.name) + '</strong> <span class="provider-count">' + mine.length + ' clave(s)</span><small>' + esc(p.hint) + '</small></div>'
+        + '<label class="provider-model">Modelo<select class="model-choice" data-provider="' + p.id + '">' + modelOptions(p) + '</select></label></div>'
+        + (mine.length ? '<table class="keys-table"><thead><tr><th>Clave</th><th>Estado</th><th>Última respuesta</th><th>Usos</th><th></th></tr></thead><tbody>' + mine.map(keyRow).join('') + '</tbody></table>' : '')
+        + '<div class="input-row add-key-row"><input type="password" class="new-key" data-provider="' + p.id + '" autocomplete="off" placeholder="Pega una clave de ' + esc(p.name) + '">'
+        + '<button class="secondary add-key-btn" data-provider="' + p.id + '">Agregar clave</button><button class="text-button get-key" data-provider="' + p.id + '">Obtener una clave ↗</button></div></div>';
+    }).join('');
+  box.querySelectorAll('.key-test').forEach(b => b.onclick = () => testKeys({id: b.dataset.id}, b));
+  box.querySelectorAll('.key-delete').forEach(b => b.onclick = async () => {
+    if (!confirm('¿Eliminar esta clave de la aplicación? Dejará de usarse en los análisis.')) return;
+    try { renderKeysHealth((await api('key_delete', {provider: b.dataset.provider, id: b.dataset.id})).keys); await refresh(); toast('Clave eliminada.'); }
+    catch (e) { toast(e.message, true); }
+  });
+  box.querySelectorAll('.get-key').forEach(b => b.onclick = async () => { try { await api('open_url', {provider: b.dataset.provider}); } catch (e) { toast(e.message, true); } });
+  box.querySelectorAll('.new-key').forEach(i => i.onkeydown = e => { if (e.key === 'Enter') box.querySelector('.add-key-btn[data-provider="' + i.dataset.provider + '"]').click(); });
+  box.querySelectorAll('.add-key-btn').forEach(b => b.onclick = async () => {
+    const input = box.querySelector('.new-key[data-provider="' + b.dataset.provider + '"]');
+    const value = input.value.trim();
+    if (!value) return toast('Pega la clave antes de agregarla.', true);
+    try {
+      await api('credentials', {[b.dataset.provider]: value});
+      input.value = ''; input.blur();
+      await refresh();
+      toast('Clave agregada. Comprobando que responda…');
+      await testKeys({provider: b.dataset.provider}, b);
+    } catch (e) { toast(e.message, true); }
+  });
+  box.querySelectorAll('.model-choice').forEach(sel => sel.onchange = async () => {
+    const p = PROVIDERS.find(x => x.id === sel.dataset.provider);
+    let value = sel.value;
+    if (value === '__other') {
+      value = (prompt('Identificador del modelo en OpenRouter (por ejemplo, proveedor/modelo:free):') || '').trim();
+      if (!value) { sel.blur(); keysSignature = ''; renderKeysHealth(keyRows); return; }
+    }
+    try { await api('settings', {[p.setting]: value}); await refresh(); toast('Modelo de ' + p.name + ' guardado: ' + value); }
+    catch (e) { toast(e.message, true); }
+    sel.blur(); keysSignature = ''; renderKeysHealth(keyRows);
+  });
+  if (!openrouterModels) api('openrouter_models').then(r => { openrouterModels = r; renderKeysHealth(keyRows); }).catch(() => {});
+  if (!geminiModels && rows.some(r => r.provider === 'gemini')) { geminiModels = {models: []}; api('gemini_models').then(r => { geminiModels = r; renderKeysHealth(keyRows); }).catch(() => {}); }
+}
+async function loadKeysHealth() {
+  clearTimeout(keysHealthTimer);
+  try { renderKeysHealth((await api('keys_health')).keys); } catch {}
+  keysHealthTimer = setTimeout(loadKeysHealth, currentPage === 'settings' ? 10000 : 30000);
+}
+async function testKeys(filter = {}, button = $('keys-test')) {
+  const label = button.textContent;
+  button.disabled = true; button.textContent = 'Probando…';
+  try { renderKeysHealth((await api('keys_test', filter)).keys); }
+  catch (e) { toast(e.message, true); }
+  finally { button.disabled = false; button.textContent = label; }
+}
+if ($('keys-test')) $('keys-test').onclick = () => testKeys();
+function showKeys() { navigate('settings'); setTimeout(() => $('keys-health-card').scrollIntoView({behavior: 'smooth'}), 100); }
+if ($('keys-indicator')) $('keys-indicator').onclick = showKeys;
+loadKeysHealth();

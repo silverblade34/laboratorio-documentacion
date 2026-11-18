@@ -15,6 +15,8 @@ S = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 REL = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
 ENTITY = r'(fabricante|proveedor|nombre comercial|tiempo de vida util|almacenamiento)'
 SPACE = '{http://www.w3.org/XML/1998/namespace}space'
+# Colores de resaltado de la vista previa (uno por cambio). Deben coincidir con .chg-N de style.css.
+PALETTE = ('FFE08A', 'A8E6CF', 'FFB3C1', 'A9D3FF', 'D9C2FF', 'FFC999', 'C5E99B', '9EE6E6', 'F5B8E8', 'E6CFA3')
 
 
 def norm(value):
@@ -98,6 +100,69 @@ def format_new_table(table, widths, borders=True):
         bd=props.find(W+'tblBorders')
         if bd is not None:
             for edge in bd:edge.set(W+'val','nil')
+
+
+W14 = '{http://schemas.microsoft.com/office/word/2010/wordml}'
+
+
+def fresh_copy(node):
+    """Copia de un nodo de Word sin identificadores de párrafo duplicados."""
+    copy = deepcopy(node)
+    for element in copy.iter():
+        for attribute in (W14+'paraId', W14+'textId'):
+            element.attrib.pop(attribute, None)
+    return copy
+
+
+def clone_row(template, values):
+    row = fresh_copy(template)
+    for cell, value in zip(row.findall(W+'tc'), values):
+        write_word(cell, value)
+    return row
+
+
+def section_b_nodes(body):
+    nodes, section = [], False
+    for node in body:
+        if node.tag == W+'p':
+            title = re.sub(r'^[a-d]\s*[.)-]\s*', '', norm(word_text(node)))
+            if re.match(r'informacion tecnico', title):
+                section = True
+            elif re.match(r'(observaciones|revision historica)', title):
+                section = False
+        if section:
+            nodes.append(node)
+    return nodes
+
+
+def block_template(body):
+    """Tabla del primer fabricante vigente: los bloques nuevos copian su formato e interlineado."""
+    blocks = manufacturer_blocks(body)
+    if not blocks:
+        return None
+    rows = blocks[0]['table'].findall(W+'tr')
+    first = next((r for r in rows if any(norm(word_text(c).strip()) == 'fabricante' for c in r.findall(W+'tc'))), None)
+    if first is None or len(rows) < 2 or len(first.findall(W+'tc')) < 3:
+        return None
+    other = rows[rows.index(first)+1] if rows.index(first)+1 < len(rows) else first
+    if len(other.findall(W+'tc')) != len(first.findall(W+'tc')):
+        return None
+    role = next(i for i, c in enumerate(first.findall(W+'tc')) if norm(word_text(c).strip()) == 'fabricante')
+    return {'table': blocks[0]['table'], 'first': first, 'other': other, 'role': role}
+
+
+def additional_template(body):
+    """Encabezado «Información adicional» y su tabla PARÁMETRO/RANGO/TÉCNICA vigentes en B."""
+    nodes = section_b_nodes(body)
+    for i, node in enumerate(nodes):
+        if node.tag != W+'p' or not norm(word_text(node)).startswith('informacion adicional'):
+            continue
+        table = next((n for n in nodes[i+1:i+4] if n.tag == W+'tbl'), None)
+        rows = table.findall(W+'tr') if table is not None else []
+        if len(rows) >= 2 and len(rows[0].findall(W+'tc')) == 3 == len(rows[1].findall(W+'tc')):
+            gap = nodes[i+1:nodes.index(table)]  # Párrafos vacíos entre el título y la tabla.
+            return {'heading': node, 'table': table, 'header': rows[0], 'row': rows[1], 'gap': gap}
+    return None
 
 
 def manufacturer_blocks(body):
@@ -184,6 +249,26 @@ class Field:
             write_word(self.node, value)
             return
         if self.kind == 'additional':
+            lines = [re.sub(r'^par[aá]metro adicional\s*:\s*', '', line, flags=re.I) for line in value.splitlines() if line.strip()]
+            if any(len(line.split(' | ')) != 3 for line in lines):
+                raise ValueError('Cada parámetro adicional debe tener: Parámetro | Rango | Referencia.')
+            body = self.node.getroottree().getroot().find(W+'body')
+            template = additional_template(body) if body is not None else None
+            if template is not None:
+                table = fresh_copy(template['table'])
+                for row in table.findall(W+'tr'):
+                    table.remove(row)
+                table.append(fresh_copy(template['header']))
+                for line in lines:
+                    table.append(clone_row(template['row'], line.split(' | ')))
+                heading = fresh_copy(template['heading'])
+                self.node.addnext(heading)
+                anchor = heading
+                for node in template['gap']:
+                    copy = fresh_copy(node); anchor.addnext(copy); anchor = copy
+                anchor.addnext(table)
+                table.addnext(ET.Element(W+'p'))
+                return
             table = ET.Element(W+'tbl')
             props = ET.SubElement(table, W+'tblPr')
             borders = ET.SubElement(props, W+'tblBorders')
@@ -221,15 +306,45 @@ class Field:
                 return
             if not re.match(r'^fabricante\s*:\s*\S', norm(value)):
                 raise ValueError('El nuevo bloque debe comenzar con «Fabricante: nombre».')
+            root_node = self.node.getroottree().getroot()
+            body = root_node.find(W+'body')
+            groups = manufacturer_blocks(body) if body is not None else []
+            number = max((g['number'] for g in groups), default=0)+1
+            template = block_template(body) if body is not None else None
+            if template is not None:
+                lines, additional = [], []
+                for line in value.splitlines():
+                    if not line.strip():
+                        continue
+                    role, separator, text = line.partition(':')
+                    if not separator or not text.strip():
+                        raise ValueError('Usa una línea por dato: Etiqueta: valor.')
+                    if norm(role) == 'parametro adicional':
+                        additional.append(text.strip())
+                    else:
+                        lines.append((role.strip(), text.strip()))
+                table = fresh_copy(template['table'])
+                for row in table.findall(W+'tr'):
+                    table.remove(row)
+                width = len(template['first'].findall(W+'tc'))
+                for index, (role, text) in enumerate(lines):
+                    values = [''] * width
+                    if template['role'] > 0:
+                        values[0] = f'{number})' if index == 0 else ''
+                    values[template['role']] = role
+                    values[template['role']+1] = ': ' + text
+                    table.append(clone_row(template['first'] if index == 0 else template['other'], values))
+                spacer = ET.Element(W+'p')
+                self.node.addprevious(spacer)
+                self.node.addprevious(table)
+                if additional:
+                    Field('B', 'Parámetros del fabricante nuevo', '', table, 'additional').write('\n'.join(additional))
+                return
             table = ET.Element(W+'tbl')
             props = ET.SubElement(table, W+'tblPr')
             borders = ET.SubElement(props, W+'tblBorders')
             for edge in ('top','left','bottom','right','insideH','insideV'):
                 ET.SubElement(borders, W+edge, {W+'val':'single', W+'sz':'4'})
-            root_node = self.node.getroottree().getroot()
-            body = root_node.find(W+'body')
-            groups = manufacturer_blocks(body) if body is not None else []
-            number = max((g['number'] for g in groups), default=0)+1
             additional = []
             first_row = True
             for line in value.splitlines():
@@ -502,36 +617,59 @@ class Specification:
                         ' '.join(lines)[0].lower() + ' '.join(lines)[1:]
                         for section, lines in groups.items())
 
-    def preview_html(self, approved, effective, add_history=True, history_text=None):
+    def apply_changes(self, approved):
+        """Aplica los cambios en el orden de exportación y devuelve {nodo: id del campo}.
+
+        El mapa permite resaltar cada cambio con su propio color en la vista previa.
+        """
+        document = self.parts['word/document.xml']
+        owners = {}
+        order = {'manufacturer': 0, 'range_add': 2}
+        for field_id, value in sorted(approved.items(), key=lambda item: order.get(self.fields[item[0]].kind, 1)):
+            field = self.fields[field_id]
+            before = set(document.iter())
+            field.write(value)
+            if field.kind in {'text', 'range', 'range_add'}:
+                owners.setdefault(field.node, field_id)
+            for node in document.iter(W+'tc', W+'p'):
+                if node not in before:
+                    owners.setdefault(node, field_id)
+        return owners
+
+    def preview_html(self, approved, effective, add_history=True, history_text=None, colors=None):
         from html import escape
         from tempfile import TemporaryDirectory
         from pathlib import Path
         # Apply exactly the same document mutations used by export, to an isolated copy.
         draft = Specification(self.data)
-        original_nodes = set(draft.parts['word/document.xml'].iter())
+        owners = draft.apply_changes(approved)
         with TemporaryDirectory() as folder:
             output = Path(folder) / 'preview.docx'
             if approved:
-                draft.export(output, approved, effective, add_history and bool((history_text if history_text is not None else self.history_summary(approved)).strip()), history_text)
-        changed = {draft.fields[i].node for i in approved if draft.fields[i].kind == 'text'}
-        changed.update(n for n in draft.parts['word/document.xml'].iter() if n not in original_nodes)
+                summary = history_text if history_text is not None else self.history_summary(approved)
+                draft.export(output, approved, effective, add_history and bool(summary.strip()), history_text, applied=True)
+        colors = colors or {}
+        def mark(node):
+            field_id = owners.get(node)
+            if field_id is None:
+                return ''
+            return f' class="modified chg-{int(colors.get(field_id, 0)) % len(PALETTE)}" data-change="{escape(field_id)}"'
         def render(node):
             tag = node.tag
-            marked = node in changed
             if tag == W+'p':
-                return '<p' + (' class="modified"' if marked else '') + '>' + escape(paragraph_text(node)).replace('\n', '<br>') + '</p>'
+                return '<p' + mark(node) + '>' + escape(paragraph_text(node)).replace('\n', '<br>') + '</p>'
             if tag == W+'tbl':
                 return '<table>' + ''.join(render(c) for c in node if c.tag == W+'tr') + '</table>'
             if tag == W+'tr':
                 return '<tr>' + ''.join(render(c) for c in node if c.tag == W+'tc') + '</tr>'
             if tag == W+'tc':
-                return '<td' + (' class="modified"' if marked else '') + '>' + ''.join(render(c) for c in node if c.tag in {W+'p', W+'tbl'}) + '</td>'
+                return '<td' + mark(node) + '>' + ''.join(render(c) for c in node if c.tag in {W+'p', W+'tbl'}) + '</td>'
             return ''
         return '<p><strong>Especificación técnica · ' + escape(self.sap) + ' · Versión ' + str(self.version + bool(approved)) + '</strong></p>' + ''.join(render(n) for n in draft.parts['word/document.xml'].find(W+'body'))
 
-    def export(self, output, approved, date, add_history=True, history_text=None):
-        for field_id, value in sorted(approved.items(), key=lambda item: {'manufacturer':0, 'range_add':2}.get(self.fields[item[0]].kind, 1)):
-            self.fields[field_id].write(value)
+    def export(self, output, approved, date, add_history=True, history_text=None, applied=False):
+        if not applied:
+            self.apply_changes(approved)
         body = self.parts['word/document.xml'].find(W+'body')
         groups = manufacturer_blocks(body)
         numbers = {g['number'] for g in groups}

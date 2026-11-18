@@ -48,3 +48,32 @@ def parameter_matches(parameter, code):
     if code == 'CC-FQ-TEC-131':
         return bool(set(words) & {'aspecto','apariencia','color','olor','sabor','textura','descripcion'})
     return any(w in text for w in words)
+
+
+def catalog_entries(used_text=''):
+    """Técnicas para mostrar: título limpio, versión, objetivo, categoría y si el Word las usa."""
+    import re
+    from office import norm
+    used = set(re.findall(r'CC-FQ-TEC-\d+', used_text))
+    items = []
+    for t in technique_context():
+        name = re.sub(r'\.pdf$', '', t['archivo'], flags=re.I)
+        name = name.replace(t['codigo'], '').strip(' -·')
+        version = re.search(r'\(V(\d+)\)', name)
+        name = re.sub(r'\(V\d+\)\s*(\d{4})?', '', name).strip(' -·')
+        # Mayúscula inicial y el resto en minúsculas; se respetan palabras con mayúsculas y minúsculas (pH).
+        words = [w if (w != w.upper() and w != w.lower()) else w.lower() for w in name.split()]
+        title = ' '.join(words)
+        title = title[:1].upper() + title[1:]
+        text = t['texto']
+        objective = re.search(r'OBJETIVO[:.\s]*(.*?)(?:\n\s*2\s*[.)]|DEFINICIONES|DOCUMENTOS A CONSULTAR|ALCANCE)', text, re.S | re.I)
+        objective = ' '.join((objective.group(1) if objective else '').split())[:600]
+        key = norm(name)
+        category = ('Preparación de soluciones' if 'preparacion' in key else
+                    'Evaluación sensorial' if 'sensorial' in key else
+                    'Envases y empaques' if re.search(r'prueba|calibre|gramaje|capacidad|volumen dosificado|medidas dimensionales|hermeticidad|torque', key) else
+                    'Análisis fisicoquímico')
+        items.append({'codigo': t['codigo'], 'titulo': title, 'version': version.group(1) if version else '',
+                      'objetivo': objective, 'categoria': category, 'en_uso': t['codigo'] in used,
+                      'ocr': bool(t.get('lectura')), 'texto': text})
+    return sorted(items, key=lambda i: (not i['en_uso'], i['codigo']))

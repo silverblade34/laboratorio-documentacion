@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 from urllib import error, request
+import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys, unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import activity_log as alog

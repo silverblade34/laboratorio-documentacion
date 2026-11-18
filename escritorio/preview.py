@@ -16,31 +16,32 @@ def renderer_path(configured=''):
     return next((str(p) for p in candidates if p and Path(p).is_file()), None)
 
 
-def render_document(spec, approved, effective, add_history, history_text, renderer=''):
-    from office import Specification, W, replace_parts
+def render_document(spec, approved, effective, add_history, history_text, renderer='', colors=None):
+    from office import Specification, W, PALETTE, replace_parts
+    from lxml import etree as ET
     import pypdfium2 as pdfium
     draft = Specification(spec.data)
-    original = set(draft.parts['word/document.xml'].iter())
+    owners = draft.apply_changes(approved)
+    colors = colors or {}
     with TemporaryDirectory(prefix='materia-preview-') as folder:
         folder = Path(folder)
         word = folder/'documento.docx'
         if approved:
-            draft.export(word, approved, effective,
-                         add_history and bool((history_text if history_text is not None else spec.history_summary(approved)).strip()), history_text)
+            summary = history_text if history_text is not None else spec.history_summary(approved)
+            draft.export(word, approved, effective, add_history and bool(summary.strip()), history_text, applied=True)
         else:
             word.write_bytes(spec.data)
-        # Only the preview copy receives highlighting; final export remains clean.
-        marked = {draft.fields[i].node for i in approved if draft.fields[i].kind in {'text','range','range_add'}}
-        marked.update(n for n in draft.parts['word/document.xml'].iter() if n not in original and n.tag in {W+'tc',W+'p'})
-        from lxml import etree as ET
-        for node in marked:
+        # Solo la copia de la vista previa recibe el sombreado; el Word exportado queda limpio.
+        # Cada cambio usa su propio color para relacionarlo con la lista de la izquierda.
+        for node, field_id in owners.items():
+            fill = PALETTE[int(colors.get(field_id, 0)) % len(PALETTE)]
             for run in node.iter(W+'r'):
                 props = run.find(W+'rPr')
                 if props is None:
-                    props=ET.Element(W+'rPr');run.insert(0,props)
-                existing=props.find(W+'highlight')
-                if existing is None:existing=ET.SubElement(props,W+'highlight')
-                existing.set(W+'val','yellow')
+                    props = ET.Element(W+'rPr'); run.insert(0, props)
+                for old in props.findall(W+'highlight') + props.findall(W+'shd'):
+                    props.remove(old)
+                ET.SubElement(props, W+'shd', {W+'val': 'clear', W+'color': 'auto', W+'fill': fill})
         if approved:
             replace_parts(spec.data, word, draft.parts)
         output=folder/'documento.pdf'

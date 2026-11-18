@@ -1,6 +1,7 @@
 """Regressions found during manual desktop acceptance on 2026-11-16."""
 from pathlib import Path
 from datetime import date
+import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys,tempfile,unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from office import Specification

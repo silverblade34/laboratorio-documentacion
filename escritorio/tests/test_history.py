@@ -1,5 +1,6 @@
 """Historial local: un análisis se reabre con propuestas y aprobaciones, sin consultar a la IA."""
 from pathlib import Path
+import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys, tempfile, unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from desktop import Workspace

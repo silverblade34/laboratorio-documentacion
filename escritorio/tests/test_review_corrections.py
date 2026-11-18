@@ -1,5 +1,6 @@
 """Correcciones de la prueba manual del caso 05 (16-11-2026), con respuestas reales guardadas."""
 from pathlib import Path
+import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import json
 import subprocess
 import sys
@@ -140,6 +141,15 @@ console.log(JSON.stringify({groups:groups.length,conflicts:rows.filter(r=>r.opti
         for value, evidence, expected in cases:
             kept, notes = validate_result(self.parsed({'id': self.maker, 'value': value, 'page': 1, 'evidence': evidence}), self.fields)
             self.assertEqual([c['value'] for c in kept if c['id'] == self.maker], [expected])
+
+    def test_schema_echo_from_free_models_is_unwrapped(self):
+        """Respuesta real de nemotron-3.5-super-vl (17-11-2026): datos dentro de una copia del esquema."""
+        aspect = self.range_add('Aspecto')
+        echoed = {'type': 'object', 'properties': {'changes': {'type': 'array', 'items': [
+            {'id': aspect, 'value': 'Fabricante: Guangzhou Tinci Materials Technology Co., Ltd. | Polvo esponjoso, blanco',
+             'page': 3, 'evidence': '9.1 Physical State: Fluffy, white powder'}]}}}
+        kept, notes = validate_result(echoed, self.fields)
+        self.assertEqual([c['id'] for c in kept], [aspect])
 
 
 if __name__ == '__main__':
