@@ -643,7 +643,9 @@ def main():
         workspace.tmp.cleanup()
         if missing:
             raise SystemExit('Faltan recursos del paquete: ' + ', '.join(missing))
-        print(f'Materia {APP_VERSION}: inicio y recursos correctos ({source_revision()})', flush=True)
+        # PyInstaller's --windowed build has no console, so stdout may be None.
+        if sys.stdout is not None:
+            print(f'Materia {APP_VERSION}: inicio y recursos correctos ({source_revision()})')
         return
     workspace = Workspace()
     server = serve(workspace, secrets.token_urlsafe(32))

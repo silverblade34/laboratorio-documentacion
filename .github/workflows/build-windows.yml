@@ -48,8 +48,8 @@ jobs:
       - name: Probar el ejecutable empaquetado
         working-directory: ./escritorio
         run: |
-          & .\dist\MateriaPrima\MateriaPrima.exe --smoke-test
-          if ($LASTEXITCODE -ne 0) { throw 'Falló la prueba de inicio del ejecutable empaquetado.' }
+          $process = Start-Process -FilePath '.\dist\MateriaPrima\MateriaPrima.exe' -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Falló la prueba de inicio del ejecutable empaquetado (código $($process.ExitCode))." }
 
       - name: Compilar Instalador con Inno Setup
         working-directory: ./escritorio

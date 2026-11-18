@@ -11,5 +11,13 @@ class PackagedStartup(unittest.TestCase):
         with patch.object(sys, 'frozen', True, create=True):
             self.assertEqual(desktop.source_revision(), f'packaged-{desktop.APP_VERSION}')
 
+    def test_smoke_test_succeeds_without_a_console(self):
+        class Temp:
+            def cleanup(self): pass
+        class FakeWorkspace:
+            def __init__(self): self.tmp=Temp()
+        with patch.object(sys, 'stdout', None), patch.object(sys, 'argv', ['MateriaPrima.exe','--smoke-test']), patch.object(desktop, 'Workspace', FakeWorkspace):
+            self.assertIsNone(desktop.main())
+
 if __name__ == '__main__':
     unittest.main()
