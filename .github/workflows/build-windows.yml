@@ -45,6 +45,12 @@ jobs:
             --add-data "ejemplo;ejemplo" `
             desktop.py
 
+      - name: Probar el ejecutable empaquetado
+        working-directory: ./escritorio
+        run: |
+          & .\dist\MateriaPrima\MateriaPrima.exe --smoke-test
+          if ($LASTEXITCODE -ne 0) { throw 'Falló la prueba de inicio del ejecutable empaquetado.' }
+
       - name: Compilar Instalador con Inno Setup
         working-directory: ./escritorio
         run: |

@@ -29,8 +29,18 @@ DEFAULT_MODEL = 'gemini-2.5-flash'
 APP_VERSION = '1.3.0'
 
 def source_revision():
+    # PyInstaller embeds imported Python modules in its archive; they are not
+    # necessarily present as desktop.py/office.py files beside the executable.
+    # A frozen build is immutable, so its application version is its revision.
+    if getattr(sys, 'frozen', False):
+        return f'packaged-{APP_VERSION}'
     names = ['desktop.py','office.py','analysis_service.py','preview.py','evidence_view.py','history.py','activity_log.py','connectivity.py','ui/app.js','ui/proposal-groups.js','ui/index.html','ui/style.css']
-    return hashlib.sha256(b''.join((ROOT/name).read_bytes() for name in names)).hexdigest()[:10]
+    try:
+        return hashlib.sha256(b''.join((ROOT/name).read_bytes() for name in names)).hexdigest()[:10]
+    except OSError:
+        # Keep startup available if a source checkout is incomplete; frozen
+        # distribution builds take the stable branch above.
+        return f'packaged-{APP_VERSION}'
 
 
 
@@ -626,6 +636,15 @@ def serve(workspace, token):
 
 
 def main():
+    if '--smoke-test' in sys.argv:
+        workspace = Workspace()
+        required = [ROOT/'ui'/'index.html', ROOT/'AS-REG-018.xlsx', ROOT/'tecnicas.json']
+        missing = [str(path) for path in required if not path.is_file()]
+        workspace.tmp.cleanup()
+        if missing:
+            raise SystemExit('Faltan recursos del paquete: ' + ', '.join(missing))
+        print(f'Materia {APP_VERSION}: inicio y recursos correctos ({source_revision()})', flush=True)
+        return
     workspace = Workspace()
     server = serve(workspace, secrets.token_urlsafe(32))
     Thread(target=server.serve_forever, daemon=True).start()

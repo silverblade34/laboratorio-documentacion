@@ -1,7 +1,7 @@
 [Setup]
 AppId=MateriaPrima.Especificaciones
 AppName=Especificaciones de Materias Primas
-AppVersion=1.2.3
+AppVersion=1.3.0
 DefaultDirName={localappdata}\Programs\MateriaPrima
 DefaultGroupName=Especificaciones de Materias Primas
 PrivilegesRequired=lowest
