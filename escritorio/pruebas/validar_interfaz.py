@@ -9,8 +9,8 @@ import sys
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from desktop import Workspace,serve,APP_VERSION
-from analysis_service import Catalog
+from materia_prima.presentation.desktop import Workspace,serve,APP_VERSION
+from materia_prima.application.analysis_service import Catalog
 import webview
 
 report=ROOT.parent/'VALIDACION_INTERFAZ'/'2026-11-16'

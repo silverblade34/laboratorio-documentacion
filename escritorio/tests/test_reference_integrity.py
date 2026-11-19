@@ -4,8 +4,8 @@ from datetime import date
 import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys,tempfile,unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from office import Specification
-from analysis_service import protect_manufacturer_ranges
+from materia_prima.domain.office import Specification
+from materia_prima.application.analysis_service import protect_manufacturer_ranges
 
 CASE=Path(__file__).resolve().parents[2]/'PRUEBAS_MANUALES/05_NUEVO_FABRICANTE_Y_PROVEEDOR/WORD_ENTRADA_V1.docx'
 class ReferenceIntegrity(unittest.TestCase):

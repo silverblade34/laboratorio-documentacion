@@ -1,5 +1,7 @@
 # Validación del fabricante
 
+Los archivos y evidencias citados se encuentran en `escritorio/pruebas/proveedor`, desde la raíz del repositorio.
+
 Se creó una copia del Word de Pure Seduction V2 y se sustituyó el fabricante por FABRICANTE DE PRUEBA. Se analizó la ficha técnica FT PURE SEDUCTION 275898 ACTUALIZADA.pdf de su carpeta.
 
 La prueba real con Gemini 2.5 Flash detectó el fabricante respaldado por el PDF. Se aplicó la propuesta y se generaron salida_corregida.docx y solicitud.xlsx. Ambos archivos se reabrieron y se comprobó el fabricante corregido, el incremento de versión y el bloque A de la solicitud. resultado.json contiene las propuestas y las observaciones reales del servicio.

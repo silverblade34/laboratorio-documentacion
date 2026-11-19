@@ -1,11 +1,12 @@
 """Laboratory methods supplied by the company; document text, never filename inference."""
+from materia_prima.paths import RESOURCE_ROOT
 from functools import lru_cache
 from pathlib import Path
 import json
 
 @lru_cache(maxsize=1)
 def technique_context():
-    path = Path(__file__).with_name('tecnicas.json')
+    path = (RESOURCE_ROOT / 'tecnicas.json')
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else []
 
 
@@ -40,7 +41,7 @@ def validate_section_a(field, value):
 def parameter_matches(parameter, code):
     """Conservative lexical guard; semantic applicability still requires review."""
     import re
-    from office import norm
+    from materia_prima.domain.office import norm
     text = next((norm(t['texto']) for t in technique_context() if t['codigo'] == code), '')
     words = re.findall(r'[a-z]{4,}', norm(parameter))
     ignored = {'solucion','acuosa','minimo','maximo','porcentaje','contenido','determinacion','analisis'}
@@ -53,7 +54,7 @@ def parameter_matches(parameter, code):
 def catalog_entries(used_text=''):
     """Técnicas para mostrar: título limpio, versión, objetivo, categoría y si el Word las usa."""
     import re
-    from office import norm
+    from materia_prima.domain.office import norm
     used = set(re.findall(r'CC-FQ-TEC-\d+', used_text))
     items = []
     for t in technique_context():

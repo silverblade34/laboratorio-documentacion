@@ -8,9 +8,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from office import Specification
-from analysis_service import validate_result, protect_manufacturer_ranges
-from evidence_view import page_preview
+from materia_prima.domain.office import Specification
+from materia_prima.application.analysis_service import validate_result, protect_manufacturer_ranges
+from materia_prima.infrastructure.evidence_view import page_preview
 
 CASE = ROOT.parent/'PRUEBAS_MANUALES/05_NUEVO_FABRICANTE_Y_PROVEEDOR'
 

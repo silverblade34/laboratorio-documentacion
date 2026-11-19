@@ -4,11 +4,11 @@ from unittest import mock
 import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys, tempfile, unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import analysis_service
-from analysis_service import validate_result, verify_proposals
-from desktop import Workspace
-from analysis_service import Catalog
-from office import Specification
+import materia_prima.application.analysis_service as analysis_service
+from materia_prima.application.analysis_service import validate_result, verify_proposals
+from materia_prima.presentation.desktop import Workspace
+from materia_prima.application.analysis_service import Catalog
+from materia_prima.domain.office import Specification
 
 CASE = Path(__file__).resolve().parents[2]/'PRUEBAS_MANUALES/05_NUEVO_FABRICANTE_Y_PROVEEDOR'
 G = 'Fabricante: Guangzhou Tinci Materials Technology Co., Ltd'

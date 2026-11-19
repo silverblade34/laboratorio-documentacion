@@ -6,10 +6,8 @@ from urllib import error, request
 import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import json, os, sys, tempfile, unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import analysis_service
-import key_health
-
-
+import materia_prima.application.analysis_service as analysis_service
+import materia_prima.infrastructure.key_health as key_health
 class Response(BytesIO):
     status = 200
     def __enter__(self): return self

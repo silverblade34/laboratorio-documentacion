@@ -7,10 +7,6 @@ if [[ -x .venv-mac/bin/python ]] && .venv-mac/bin/python -c 'import webview, lxm
     fi
     exec .venv-mac/bin/python desktop.py
 fi
-runtime="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
-if [[ -x "$runtime" ]] && "$runtime" -c 'import tkinter, lxml, pypdf, pypdfium2, PIL' 2>/dev/null; then
-    exec "$runtime" desktop.py
-fi
 python_bin=${MP_PYTHON:-python3}
 if ! "$python_bin" -c 'import tkinter' 2>/dev/null; then
     echo 'Se requiere Python con Tkinter. Instala Python para macOS desde python.org.'

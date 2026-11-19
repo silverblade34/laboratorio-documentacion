@@ -17,7 +17,7 @@ def renderer_path(configured=''):
 
 
 def render_document(spec, approved, effective, add_history, history_text, renderer='', colors=None):
-    from office import Specification, W, PALETTE, replace_parts
+    from materia_prima.domain.office import Specification, W, PALETTE, replace_parts
     from lxml import etree as ET
     import pypdfium2 as pdfium
     draft = Specification(spec.data)
@@ -53,7 +53,7 @@ def render_document(spec, approved, effective, add_history, history_text, render
             if result.returncode or not output.is_file():
                 raise ValueError('El renderizador no pudo convertir el Word. Revisa su instalación en Configuración o usa la vista de contenido.')
         elif os.name == 'nt':
-            script=folder/'preview.ps1'
+            script=folder/'materia_prima.infrastructure.preview.ps1'
             script.write_text('''param([string]$Source,[string]$Destination)
 $ErrorActionPreference='Stop'
 $word=New-Object -ComObject Word.Application
@@ -66,7 +66,7 @@ try {$doc.ExportAsFixedFormat($Destination,17)} finally {$doc.Close(0)}} finally
             raise ValueError('Para ver las páginas reales instala LibreOffice o indica su ejecutable en Configuración. Puedes usar Vista de contenido mientras tanto.')
         if not output.exists():raise ValueError('No se generó el PDF de previsualización.')
         pages=[]
-        from evidence_view import PDFIUM_LOCK
+        from materia_prima.infrastructure.evidence_view import PDFIUM_LOCK
         with PDFIUM_LOCK:  # PDFium no admite llamadas simultáneas desde varios hilos.
             document=pdfium.PdfDocument(str(output))
             try:

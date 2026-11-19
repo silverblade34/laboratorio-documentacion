@@ -1,5 +1,7 @@
 # Validación desde la interfaz
 
+Los archivos y evidencias citados se encuentran en `escritorio/pruebas/interfaz`, desde la raíz del repositorio.
+
 Se recorrió la aplicación en una ventana visible de navegador con los mismos controles HTML de la ventana de escritorio. Se pulsó el botón del ejemplo, se inició el análisis real, se abrió la propuesta y su evidencia, se aprobó y se creó el expediente desde el asistente.
 
 La prueba detectó el cambio de FABRICANTE DE PRUEBA a ESENCIAS MOLES S.A. usando la ficha técnica del ejemplo y Gemini 2.5 Flash. Luego se utilizó Cambio manual para modificar un proveedor y aprobarlo.

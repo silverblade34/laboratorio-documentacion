@@ -6,8 +6,8 @@ from urllib import error, request
 import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys, unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import activity_log as alog
-from analysis_service import ServiceError, send_request
+import materia_prima.infrastructure.activity_log as alog
+from materia_prima.application.analysis_service import ServiceError, send_request
 
 
 class ActivityLog(unittest.TestCase):

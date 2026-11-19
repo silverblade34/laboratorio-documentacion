@@ -5,12 +5,12 @@ from unittest import mock
 import aislar  # noqa: F401  (antes que los módulos de la aplicación)
 import sys, tempfile, unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import analysis_service
-from analysis_service import (complete_explicit_relations, entity_origin, fix_commercial_block,
+import materia_prima.application.analysis_service as analysis_service
+from materia_prima.application.analysis_service import (complete_explicit_relations, entity_origin, fix_commercial_block,
                               reconcile_commercial_roles, validate_result)
-from desktop import Workspace
-from analysis_service import Catalog
-from office import Specification
+from materia_prima.presentation.desktop import Workspace
+from materia_prima.application.analysis_service import Catalog
+from materia_prima.domain.office import Specification
 
 CASE = Path(__file__).resolve().parents[2]/'PRUEBAS_MANUALES/05_NUEVO_FABRICANTE_Y_PROVEEDOR'
 G = 'Guangzhou Tinci Materials Technology Co., Ltd'
@@ -140,7 +140,7 @@ class ReviewView(unittest.TestCase):
 
     def test_new_block_copies_format_of_existing_block(self):
         """Los bloques nuevos usan la tabla, el interlineado y el «: valor» del fabricante vigente."""
-        from office import W, manufacturer_blocks, word_text
+        from materia_prima.domain.office import W, manufacturer_blocks, word_text
         spec = Specification((CASE/'WORD_ENTRADA_V1.docx').read_bytes())
         maker = next(i for i, f in spec.fields.items() if f.kind == 'manufacturer')
         spec.apply_changes({maker: f'Fabricante: {G}\nProveedor: QUÍMICOS GOICOCHEA S.A.C.\n'

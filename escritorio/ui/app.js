@@ -234,6 +234,7 @@ async function navigate(page) {
     $('settings-area').value = state.settings.area || '';
     $('settings-template').value = state.settings.plantilla || 'AS-REG-018 · Plantilla incluida';
     $('settings-renderer').value = state.settings.renderizador || '';
+    $('settings-learning').checked = state.settings.aprendizaje !== false;
   }
   if (page === 'catalog') {
     try {
@@ -492,7 +493,7 @@ $('approve-button').onclick = async () => {
 };
 $('settings-pick-folder').onclick = () => pickFolder('settings-folder');
 $('export-pick-folder').onclick = () => pickFolder('export-folder');
-$('save-settings').onclick = async () => {try{await perform('settings',{salida:$('settings-folder').value,solicitante:$('settings-applicant').value,area:$('settings-area').value,renderizador:$('settings-renderer').value});toast('Preferencias guardadas.');}catch{}};
+$('save-settings').onclick = async () => {try{await perform('settings',{salida:$('settings-folder').value,solicitante:$('settings-applicant').value,area:$('settings-area').value,renderizador:$('settings-renderer').value,aprendizaje:$('settings-learning').checked});toast('Preferencias guardadas.');}catch{}};
 /* Vista de revisión en el documento: el Word se muestra como si se aprobaran todos los cambios
    incluidos; a la izquierda, cada cambio con su color para marcarlo conforme o quitarlo. */
 const PALETTE_SIZE = 10;

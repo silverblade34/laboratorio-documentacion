@@ -644,7 +644,7 @@ class Specification:
         draft = Specification(self.data)
         owners = draft.apply_changes(approved)
         with TemporaryDirectory() as folder:
-            output = Path(folder) / 'preview.docx'
+            output = Path(folder) / 'materia_prima.infrastructure.preview.docx'
             if approved:
                 summary = history_text if history_text is not None else self.history_summary(approved)
                 draft.export(output, approved, effective, add_history and bool(summary.strip()), history_text, applied=True)
